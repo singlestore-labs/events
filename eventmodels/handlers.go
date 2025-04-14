@@ -2,13 +2,14 @@ package eventmodels
 
 import (
 	"context"
+	"os"
 	"time"
 
 	"github.com/memsql/errors"
 	"github.com/segmentio/kafka-go"
 )
 
-var debugDelivery = false
+var debugDelivery = os.Getenv("EVENTS_DEBUG_DELIVERY") == "true"
 
 // Event abstracts away the underlying message system (Kafka)
 //

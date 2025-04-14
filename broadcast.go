@@ -12,8 +12,8 @@ import (
 	"github.com/memsql/errors"
 	"github.com/segmentio/kafka-go"
 
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/util/simultaneous"
+	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/simultaneous"
 )
 
 type HeartbeatEvent struct{}

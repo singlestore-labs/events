@@ -9,10 +9,8 @@ import (
 	"github.com/segmentio/kafka-go"
 	"github.com/stretchr/testify/require"
 
-	"singlestore.com/helios/events"
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/test/di"
-	"singlestore.com/helios/trace"
+	"github.com/singlestore-labs/events"
+	"github.com/singlestore-labs/events/eventmodels"
 )
 
 // ErrorWhenMisusedTest verifies that publishing events fails when:
@@ -27,15 +25,14 @@ func ErrorWhenMisusedTest[
 	ctx context.Context,
 	t ntest.T,
 	conn DB,
-	brokers di.Brokers,
-	tracer trace.Iface,
-	cancel di.Cancel,
+	brokers Brokers,
+	cancel Cancel,
 ) {
 	type myEvent map[string]string
 
 	lib := events.New[ID, TX, DB]()
 	lib.SetEnhanceDB(true)
-	lib.Configure(conn, tracer, true, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, t, true, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	produceDone, err := lib.CatchUpProduce(ctx, time.Second*10, 20)
 	require.NoError(t, err)
 
@@ -47,13 +44,23 @@ func ErrorWhenMisusedTest[
 	t.Log("The bad topics are not a blocker for the transaction because they're asyncronously")
 	startTime := time.Now()
 	require.NoError(t, conn.Transact(ctx, func(tx TX) error {
+		return nil
+	}))
+	duration := time.Since(startTime)
+	t.Log("time for an empty transaction: %s", duration)
+	require.Lessf(t, duration, time.Second, "empty tx should be fast, not %s", duration)
+
+	t.Log("The bad topics are not a blocker for the transaction because they're produced asynchronously")
+	startTime = time.Now()
+	require.NoError(t, conn.Transact(ctx, func(tx TX) error {
 		tx.Produce(badTopic.Event("irrelevant", myEvent{"foo": "bar"}).
 			ID("doesn't matter"),
 		)
 		t.Logf("added events to transaction")
 		return nil
 	}), "transact/send with bad topic")
-	duration := time.Since(startTime)
+	duration = time.Since(startTime)
+	t.Log("time for an transaction with event: %s", duration)
 	require.Lessf(t, duration, time.Second, "tx should be fast, not %s", duration)
 
 	t.Log("immediate produce will check the topic and should error")

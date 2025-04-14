@@ -4,15 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/memsql/errors"
-	"go.uber.org/atomic"
 
-	"singlestore.com/helios/events/eventmodels"
+	"github.com/singlestore-labs/events/eventmodels"
 )
 
 var uniqueID atomic.Int64
 
+// ExampleBasicDB wraps a *sql.DB but does not implment AugmentWithProducer
 type ExampleBasicDB struct {
 	*sql.DB
 }

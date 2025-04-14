@@ -1,0 +1,127 @@
+name: SingleStore tests
+on: [push]
+
+permissions:  # added using https://github.com/step-security/secure-workflows
+  contents: read
+
+jobs:
+  Test-Singlestore-integration:
+    runs-on: ubuntu-latest
+
+    environment: singlestore
+
+    services:
+      singlestoredb:
+        image: ghcr.io/singlestore-labs/singlestoredb-dev
+        ports:
+          - 3306:3306
+          - 8080:8080
+          - 9000:9000
+        env:
+          ROOT_PASSWORD: test
+          SINGLESTORE_LICENSE: ${{ secrets.SINGLESTORE_LICENSE }}
+
+      kafka:
+        image: bitnami/kafka:3.6.2
+        env:
+          KAFKA_BROKER_ID: 1
+          KAFKA_CFG_NODE_ID: 1
+          KAFKA_CFG_PROCESS_ROLES: controller,broker
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: false
+          KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+          KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+        ports:
+          - 9092:9092
+          - 9093:9093
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@c6295a65d1254861815972266d5933fd6e532bdf
+        with:
+          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+
+      - name: sanity check using mysql client
+        run: |
+          mysql -u root -ptest -e "CREATE DATABASE eventstest partitions 2" -h 127.0.0.1
+          mysql -u root -ptest -e "set global snapshots_to_keep = 1" -h 127.0.0.1
+          mysql -u root -ptest -e "set global minimal_disk_space = 10" -h 127.0.0.1
+          mysql -u root -ptest -e "set global log_file_size_partitions = 1048576" -h 127.0.0.1
+          mysql -u root -ptest -e "set global log_file_size_ref_dbs = 1048576" -h 127.0.0.1
+          mysql -u root -ptest -e "select @@data_conversion_compatibility_level" -h 127.0.0.1
+          mysql -u root -ptest -e "SET GLOBAL data_conversion_compatibility_level = '7.0'" -h 127.0.0.1
+
+      - name: Check out repository code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Go
+        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b
+        with:
+          go-version: '1.22'
+
+      - name: Get Go cache paths
+        id: go-cache-paths
+        run: |
+          echo "go-build=$(go env GOCACHE)" >> $GITHUB_OUTPUT
+          echo "go-mod=$(go env GOMODCACHE)" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Go Build Cache
+        id: events-build
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.go-cache-paths.outputs.go-build }}
+          key: ${{ runner.os }}.go-build-${{ hashFiles('**/go.sum') }}-1.22.x
+     
+      - name: Go Mod Cache
+        id: events-mod
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.go-cache-paths.outputs.go-mod }}
+          key: ${{ runner.os }}.go-build-${{ hashFiles('**/go.sum') }}-1.22.x
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        env:
+          EVENTS_S2TEST_DSN: "root:test@tcp(127.0.0.1:3306)/eventstest?tls=false&parseTime=true"
+          EVENTS_KAFKA_BROKERS: "localhost:9092"
+          EVENTS_DEBUG_NOTIFY: "true"
+          EVENTS_DEBUG_PRODUCE: "true"
+          EVENTS_DEBUG_DELIVERY: "true"
+          EVENTS_DEBUG_ACK: "false"
+          EVENTS_DEBUG_CONSUME: "true"
+          EVENTS_DEBUG_START_CONSUME: "true"
+          EVENTS_DEBUG_BATCHING: "true"
+        run: go test ./events2/... -v --parallel 3
+
+      - name: Run Coverage
+        env:
+          EVENTS_S2TEST_DSN: "root:test@tcp(127.0.0.1:3306)/eventstest?tls=false&parseTime=true"
+          EVENTS_KAFKA_BROKERS: "localhost:9092"
+          EVENTS_DEBUG_NOTIFY: "true"
+          EVENTS_DEBUG_PRODUCE: "true"
+          EVENTS_DEBUG_DELIVERY: "true"
+          EVENTS_DEBUG_ACK: "true"
+          EVENTS_DEBUG_CONSUME: "true"
+          EVENTS_DEBUG_START_CONSUME: "true"
+          EVENTS_DEBUG_BATCHING: "true"
+        run: go test -coverprofile=coverage.txt -covermode=atomic -coverpkg=github.com/singlestore-labs/events/... ./events2/... --parallel 3
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          version: "v0.1.15"
+          verbose: true
+          fail_ci_if_error: true
+          flags: singlestore_tests
+

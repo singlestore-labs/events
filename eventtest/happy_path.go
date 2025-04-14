@@ -12,14 +12,11 @@ import (
 	"github.com/memsql/errors"
 	"github.com/memsql/ntest"
 	"github.com/segmentio/kafka-go"
+	"github.com/singlestore-labs/events"
+	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/wait"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"singlestore.com/helios/events"
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/test/di"
-	"singlestore.com/helios/testutil"
-	"singlestore.com/helios/util/wait"
 )
 
 // EventDeliveryTest verifies:
@@ -40,10 +37,10 @@ func EventDeliveryTest[
 	DB AugmentAbstractDB[ID, TX],
 ](
 	ctx context.Context,
-	t di.T,
+	t ntest.T,
 	conn DB,
-	brokers di.Brokers,
-	cancel di.Cancel,
+	brokers Brokers,
+	cancel Cancel,
 ) {
 	baseT := t
 	t = ntest.ExtraDetailLogger(t, "TED-T")
@@ -51,8 +48,8 @@ func EventDeliveryTest[
 	lib1.SetEnhanceDB(true)
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SetEnhanceDB(true)
-	lib1.Configure(conn, testutil.NewTestingLogger(ntest.ExtraDetailLogger(baseT, "TED-1")), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	lib2.Configure(conn, testutil.NewTestingLogger(ntest.ExtraDetailLogger(baseT, "TED-2")), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, "TED-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TED-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	conn.AugmentWithProducer(lib1)
 
 	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t))
@@ -74,7 +71,7 @@ func EventDeliveryTest[
 				t.Logf("received callback for %s/%s but id is wrong (%s vs %s)", name, event.Topic, event.ID, id)
 				return nil
 			}
-			t.Logf("received callback for %s/%s, already failed: %v", name, event.Topic, failed[name])
+			t.Logf("received callback for %s/%s, already failed: %v (will deliberately fail once)", name, event.Topic, failed[name])
 			assert.Equalf(t, now.Format(time.RFC3339Nano), event.Timestamp.UTC().Format(time.RFC3339Nano), "callback for %s/%s", name, event.Topic)
 			lock.Lock()
 			defer lock.Unlock()
@@ -83,7 +80,7 @@ func EventDeliveryTest[
 				return nil
 			}
 			failed[name] = true
-			return errors.Errorf("failing %s", name)
+			return errors.Errorf("failing (on purpose) %s", name)
 		}
 	}
 
@@ -227,8 +224,8 @@ func CloudEventEncodingTest[
 	ctx context.Context,
 	t ntest.T,
 	conn DB,
-	brokers di.Brokers,
-	cancel di.Cancel,
+	brokers Brokers,
+	cancel Cancel,
 ) {
 	t = ntest.ExtraDetailLogger(t, "TCEE")
 	lib := events.New[ID, TX, DB]()
@@ -248,7 +245,7 @@ func CloudEventEncodingTest[
 			return nil
 		}))
 
-	lib.Configure(conn, testutil.NewTestingLogger(t), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, t, false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	produceDone, err := lib.CatchUpProduce(ctx, time.Second*5, 64)
 	require.NoError(t, err, "start catch up")
 	done := lib.StartConsumingOrPanic(ctx)

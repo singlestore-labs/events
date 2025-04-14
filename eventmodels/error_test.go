@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"singlestore.com/helios/events/eventmodels"
+	"github.com/singlestore-labs/events/eventmodels"
 )
 
 func TestErrorWrapping(t *testing.T) {

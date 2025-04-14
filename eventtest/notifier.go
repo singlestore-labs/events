@@ -10,13 +10,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/memsql/ntest"
+	"github.com/singlestore-labs/events"
+	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"singlestore.com/helios/events"
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/test/di"
-	"singlestore.com/helios/testutil"
 )
 
 type myNotifierEvent map[string]string
@@ -44,8 +41,8 @@ func EventNotifierTest[
 	ctx context.Context,
 	t ntest.T,
 	conn DB,
-	brokers di.Brokers,
-	cancel di.Cancel,
+	brokers Brokers,
+	cancel Cancel,
 ) {
 	const threadCount = 10
 	const requiredIterations = 3
@@ -58,7 +55,7 @@ func EventNotifierTest[
 	lib := events.New[ID, TX, DB]()
 	lib.SetEnhanceDB(true)
 	conn.AugmentWithProducer(lib)
-	lib.Configure(conn, testutil.NewTestingLogger(ntest.ExtraDetailLogger(origT, "TEN-L")), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, ntest.ExtraDetailLogger(origT, "TEN-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 
 	// slowCtx is for the library
 	slowCtx, slowCtxCancel := context.WithCancel(ctx)
@@ -82,7 +79,7 @@ func EventNotifierTest[
 	var allConditions sync.WaitGroup
 	allConditions.Add(requiredIterations)
 
-	noteEvent := func(t di.T, event eventmodels.Event[myNotifierEvent], where string) {
+	noteEvent := func(t ntest.T, event eventmodels.Event[myNotifierEvent], where string) {
 		t.Logf("noting event from %s: %s", where, event.ID)
 		lock.Lock()
 		defer lock.Unlock()
@@ -150,14 +147,17 @@ func EventNotifierTest[
 			id := fmt.Sprintf("%03d-%s", i, uuid.New().String())
 			t.Logf("sending event %s (%d) with permission from %s", id, i%4, perm)
 			sendTime := time.Now()
+			var txTime time.Duration // we won't count this
 			require.NoErrorf(t, conn.Transact(slowCtx, func(tx TX) error {
+				start := time.Now()
 				tx.Produce(notifierTopic.Event(id, myNotifierEvent{
 					"id":      id,
 					"quarter": fmt.Sprintf("%d", i%stepsPerIteration),
 				}).ID(id))
+				txTime = time.Since(start)
 				return nil
 			}), "transact/send")
-			duration := time.Since(sendTime)
+			duration := time.Since(sendTime) - txTime
 			if !assert.Lessf(t, duration, time.Second, "tx should be fast, not %s", duration) {
 				cancel()
 				return

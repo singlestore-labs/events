@@ -5,25 +5,28 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/memsql/errors"
 	"github.com/muir/libschema"
 	"github.com/muir/libschema/lssinglestore"
 
-	"singlestore.com/helios/events"
-	"singlestore.com/helios/events/eventdb"
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/util/generic"
+	"github.com/singlestore-labs/events"
+	"github.com/singlestore-labs/events/eventdb"
+	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/generic"
 )
 
 const (
-	debugging              = false
 	produceFromTableBuffer = 512
+	minimumLockAttemptTime = 100 * time.Millisecond // DB BEGIN + SELECT FOR UPDATE
+	foreverLockAttemptTime = time.Minute * 2
 )
 
-const minimumLockAttemptTime = 100 * time.Millisecond // DB BEGIN + SELECT FOR UPDATE
+var debugging = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
 
 type Connection[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]] struct {
 	eventdb.BasicDB[TX]
@@ -89,9 +92,9 @@ var _ eventmodels.AbstractDB[eventmodels.BinaryEventID, eventdb.BasicTX] = &Conn
 
 var _ eventmodels.CanAugment[eventmodels.BinaryEventID, eventdb.BasicTX] = &Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
 
-func (w *Connection[TX, DB]) AugmentWithProducer(producer eventmodels.Producer[eventmodels.BinaryEventID, TX]) {
-	w.producer = producer
-	if augmenter, ok := any(w.BasicDB).(eventmodels.CanAugment[eventmodels.BinaryEventID, TX]); ok {
+func (c *Connection[TX, DB]) AugmentWithProducer(producer eventmodels.Producer[eventmodels.BinaryEventID, TX]) {
+	c.producer = producer
+	if augmenter, ok := any(c.BasicDB).(eventmodels.CanAugment[eventmodels.BinaryEventID, TX]); ok {
 		augmenter.AugmentWithProducer(producer)
 	}
 }
@@ -99,9 +102,9 @@ func (w *Connection[TX, DB]) AugmentWithProducer(producer eventmodels.Producer[e
 // The methods that Connection supports are all done with stubs so that the underlying implementations can be
 // reused by other implementations of AbstractDB.
 
-func (w Connection[TX, DB]) tracer() eventmodels.Tracer {
-	if w.producer != nil {
-		return w.producer.Tracer()
+func (c Connection[TX, DB]) tracer() eventmodels.Tracer {
+	if c.producer != nil {
+		return c.producer.Tracer()
 	}
 	return nil
 }
@@ -151,6 +154,9 @@ func LockOrError[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](
 			}
 		}
 	}()
+	if timeout == 0 {
+		timeout = foreverLockAttemptTime
+	}
 	if timeout < minimumLockAttemptTime {
 		timeout = minimumLockAttemptTime
 	}
@@ -270,7 +276,7 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 	} else {
 		sb = sb.Where(sq.Eq{"id": ids})
 	}
-	q, args, err := sb.ToSql()
+	q, args, err := sb.PlaceholderFormat(sq.Question).ToSql()
 	if err != nil {
 		return 0, errors.Errorf("[Events] cannot build query to produce events: %w", err)
 	}
@@ -381,7 +387,7 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer e
 	if tracer != nil {
 		tracer.Logf("[events] saving %d events as part of a transaction, example topic: '%s'", len(events), events[0].GetTopic())
 	}
-	sql, args, err := ib.ToSql()
+	sql, args, err := ib.PlaceholderFormat(sq.Question).ToSql()
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}

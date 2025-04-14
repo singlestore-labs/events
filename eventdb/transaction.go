@@ -6,7 +6,7 @@ import (
 
 	"github.com/memsql/errors"
 
-	"singlestore.com/helios/events/eventmodels"
+	"github.com/singlestore-labs/events/eventmodels"
 )
 
 // BasicTX is what's needed from a transaction in WrapTransaction
