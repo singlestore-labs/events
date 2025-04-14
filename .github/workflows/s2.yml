@@ -117,11 +117,11 @@ jobs:
         run: go test -coverprofile=coverage.txt -covermode=atomic -coverpkg=github.com/singlestore-labs/events/... ./events2/... --parallel 3
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          version: "v0.1.15"
           verbose: true
           fail_ci_if_error: true
-          flags: singlestore_tests
-
+          flags: s2_tests
+          name: s2_tests
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
