@@ -2,14 +2,15 @@ package events
 
 import (
 	"context"
+	"os"
 	"sync"
 
 	"github.com/memsql/errors"
 	"github.com/memsql/keyeddistributor"
 	"github.com/sharnoff/eventdistributor"
 
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/util/simultaneous"
+	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/simultaneous"
 )
 
 // CanConsumeBroadcast is implemented by [Library]
@@ -21,7 +22,7 @@ type CanConsumeBroadcast interface {
 
 var _ CanConsumeBroadcast = &Library[eventmodels.StringEventID, eventmodels.AbstractTX, eventmodels.AbstractDB[eventmodels.StringEventID, eventmodels.AbstractTX]]{}
 
-const debugNotify = false
+var debugNotify = os.Getenv("EVENTS_DEBUG_NOTIFY") == "true"
 
 type NotifierOpt func(*notifierConfig)
 

@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"singlestore.com/helios/events"
+	"github.com/singlestore-labs/events"
 )
 
 func TestSASLConfig(t *testing.T) {

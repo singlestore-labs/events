@@ -13,10 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"singlestore.com/helios/events"
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/test/di"
-	"singlestore.com/helios/testutil"
+	"github.com/singlestore-labs/events"
+	"github.com/singlestore-labs/events/eventmodels"
 )
 
 const (
@@ -33,8 +31,8 @@ func BatchDeliveryTest[
 	ctx context.Context,
 	t ntest.T,
 	conn DB,
-	brokers di.Brokers,
-	cancel di.Cancel,
+	brokers Brokers,
+	cancel Cancel,
 ) {
 	type myType map[string]string
 
@@ -107,7 +105,7 @@ func BatchDeliveryTest[
 
 	t.Log("handlers registered")
 
-	lib.Configure(conn, testutil.NewTestingLogger(ntest.ExtraDetailLogger(baseT, "TBD-L")), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, "TBD-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 
 	produceDone, err := lib.CatchUpProduce(ctx, time.Second*5, 64)
 	defer func() {

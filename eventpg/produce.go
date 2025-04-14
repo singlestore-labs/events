@@ -4,21 +4,22 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
+	_ "github.com/lib/pq"
 	"github.com/memsql/errors"
+	"github.com/muir/libschema"
+	"github.com/muir/libschema/lspostgres"
 
-	"singlestore.com/helios/events"
-	"singlestore.com/helios/events/eventdb"
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/util/generic"
+	"github.com/singlestore-labs/events"
+	"github.com/singlestore-labs/events/eventdb"
+	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/generic"
 )
 
-const (
-	debugging              = false
-	produceFromTableBuffer = 512
-)
+var debugging = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
 
 type Connection[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]] struct {
 	eventdb.BasicDB[TX]
@@ -204,7 +205,7 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 	} else {
 		sb = sb.Where(sq.Eq{"id": ids})
 	}
-	q, args, err := sb.ToSql()
+	q, args, err := sb.PlaceholderFormat(sq.Dollar).ToSql()
 	if err != nil {
 		return 0, errors.Errorf("[Events] cannot build query to produce events: %w", err)
 	}
@@ -218,7 +219,7 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 	err = db.Transact(ctx, func(tx TX) (finalErr error) {
 		rows, err := tx.QueryContext(ctx, q, args...)
 		if err != nil {
-			return errors.Errorf("cannot delete produced events: %w", err)
+			return errors.Errorf("cannot delete produced events: %w\nquery was %s", err, q)
 		}
 		defer func() {
 			err := rows.Close()
@@ -304,7 +305,7 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer e
 	if tracer != nil {
 		tracer.Logf("[events] saving %d events as part of a transaction, example topic: '%s'", len(events), events[0].GetTopic())
 	}
-	sql, args, err := ib.ToSql()
+	sql, args, err := ib.PlaceholderFormat(sq.Dollar).ToSql()
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -314,4 +315,38 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer e
 		return nil, errors.WithStack(err)
 	}
 	return ids, nil
+}
+
+func Migrations(database *libschema.Database) {
+	database.Migrations("events",
+		lspostgres.Script("create-eventsOutgoing-table", `
+			CREATE TABLE IF NOT EXISTS eventsOutgoing (
+				id		uuid				NOT NULL,
+				topic		varchar(255)			NOT NULL,
+				ts		timestamp with time zone	NOT NULL,
+				sequenceNumber	int				NOT NULL,
+				key		text				NOT NULL,
+				headers		json				NOT NULL,
+				data		json				NOT NULL,
+				PRIMARY KEY (id)
+			);
+
+			COMMENT ON TABLE eventsOutgoing IS 'ephemeral data, only existing until events are sent to Kafka';
+
+			CREATE INDEX eventsOutgoing_ts_idx ON eventsOutgoing (ts, sequenceNumber);
+			`),
+
+		lspostgres.Script("create-eventsProcessed-table", `
+			CREATE TABLE IF NOT EXISTS eventsProcessed (
+				topic		varchar(255)			NOT NULL,
+				handlerName	varchar(255)			NOT NULL,
+				source		varchar(255)			NOT NULL,
+				id		varchar(255)			NOT NULL,
+				processedAt	timestamp with time zone,
+				PRIMARY KEY	(topic, source, id, handlerName)
+			);
+
+			COMMENT ON TABLE eventsProcessed IS 'persistent data to track exactly-once consumer deliveries';
+			`),
+	)
 }

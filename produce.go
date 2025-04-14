@@ -4,22 +4,18 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/memsql/errors"
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/protocol"
-
-	"singlestore.com/helios/codegate"
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/trace"
-	"singlestore.com/helios/util/generic"
+	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/generic"
 )
 
-const debugProduce = false
-
-var NoBlockCodegate = codegate.New("KafkaDownDoesNotBlock")
+var debugProduce = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
 
 // Produce sends events directly to Kafka. It is not transactional. Use tx.Produce to produce
 // from within a transaction.
@@ -43,9 +39,7 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 		messages[i].Topic = topic
 		ProduceTopicCounts.WithLabelValues(topic, string(method)).Inc()
 		messages[i].Key = []byte(event.GetKey())
-		if tracer := trace.FromContextOrNil(ctx); tracer != nil {
-			tracer.Logf("[events] produce %s / %s", messages[i].Topic, string(messages[i].Key))
-		} else if debugProduce {
+		if debugProduce {
 			lib.tracer.Logf("[events] produce %s / %s", messages[i].Topic, string(messages[i].Key))
 		}
 		ts := event.GetTimestamp()
@@ -103,12 +97,13 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventIDs [
 			ProduceFromTxSplit.WithLabelValues("async").Inc()
 			return nil
 		default:
-			if NoBlockCodegate.Enabled() {
-				// the channel is full, we're going to let CatchUpProduce
-				// handle it
-				ProduceFromTxSplit.WithLabelValues("catch-up").Inc()
-				return nil
+			// the channel is full, we're going to let CatchUpProduce
+			// handle it
+			if debugProduce {
+				lib.tracer.Logf("[events] debug: produce from table channel is full")
 			}
+			ProduceFromTxSplit.WithLabelValues("catch-up").Inc()
+			return nil
 		}
 	}
 	if lib.lazyProduce {
@@ -116,6 +111,9 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventIDs [
 	}
 	if lib.db == nil {
 		return errors.Errorf("cannot produce from table with nil db")
+	}
+	if debugProduce {
+		lib.tracer.Logf("[events] debug: produceFromTable producing synchronously because no producer is running")
 	}
 	ProduceFromTxSplit.WithLabelValues("sync").Inc()
 	_ = lib.ProduceSyncCount.Add(uint64(len(eventIDs)))

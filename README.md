@@ -25,7 +25,7 @@ The events library tries to make using Kafka super easy. It provides:
 - When used with a transactional database:
 
   - exactly once semantics for message consumption
-  - at least once semeantics for messages created during a transaction
+  - at least once semantics for messages created during a transaction
   - support for PostgreSQL
   - support for SingleStore
 
@@ -233,10 +233,16 @@ This behavior is designed to increase efficiency when handling more than one mes
 is more efficient than handling one message at a time. This is usually true for the 
 `ConsumeExactlyOnce` handlers because fewer transactions will be created.
 
+## Dynamic opt-in/opt-out consumption of broadcast consumers
+
+To add/remove consumers at runtime, use `RegisterFiltered` and `RegisterUnfiltered`. 
+`RegisterFiltered` uses a function to extract a key from an event so that you can then
+subscribe to specific keys.
+
 ## Without a database
 
 The event library does not require a database connection. Without a database connection some
-features are not availble:
+features are not available:
 
 - produce from within a transaction
 - catch up production
@@ -244,5 +250,9 @@ features are not availble:
 
 ## Kafka configuration
 
-For production use, set `min.insync.replicas` to be at least 2 and `replication.factor` to be at least 3 and have
-`replication.factor` equal to your number of availability zones (which should be at least 3).
+For production use, configure:
+
+- at least 3 availablity zones (replicas);
+- `min.insync.replicas` to be at least 2;
+- `replication.factor` to be at least one more than `min.insync.replicas` and equal to your number of replicas.
+

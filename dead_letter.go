@@ -8,7 +8,7 @@ import (
 	"github.com/memsql/errors"
 	"github.com/segmentio/kafka-go"
 
-	"singlestore.com/helios/events/eventmodels"
+	"github.com/singlestore-labs/events/eventmodels"
 )
 
 const (

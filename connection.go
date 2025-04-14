@@ -18,9 +18,9 @@ import (
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl"
 
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/util/generic"
-	"singlestore.com/helios/util/simultaneous"
+	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/generic"
+	"github.com/singlestore-labs/simultaneous"
 )
 
 var _ eventmodels.Producer[eventmodels.StringEventID, eventmodels.AbstractTX] = &Library[eventmodels.StringEventID, eventmodels.AbstractTX, eventmodels.AbstractDB[eventmodels.StringEventID, eventmodels.AbstractTX]]{}

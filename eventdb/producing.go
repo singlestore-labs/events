@@ -3,7 +3,7 @@ package eventdb
 import (
 	"time"
 
-	"singlestore.com/helios/events/eventmodels"
+	"github.com/singlestore-labs/events/eventmodels"
 )
 
 // ProducingEventBlob is used to bridge from pending events stored in the

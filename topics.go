@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,8 +12,8 @@ import (
 	"github.com/memsql/errors"
 	"github.com/segmentio/kafka-go"
 
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/util/generic"
+	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/generic"
 )
 
 // This file handles the creation of topics. Topic creation is done on-the-fly as
@@ -186,8 +187,18 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, topics []s
 			if tc.ReplicationFactor > len(lib.brokers) {
 				tc.ReplicationFactor = len(lib.brokers)
 			}
+			mir := getIntConfigValue(tc, "min.insync.replicas")
+			if mir <= 0 || mir >= int64(tc.ReplicationFactor) {
+				mir = int64(tc.ReplicationFactor) - 1
+				if mir == 0 {
+					mir = 1
+				}
+				tc.ConfigEntries = setIntConfigValue(tc, "min.insync.replicas", mir)
+			}
+
+			mir = getIntConfigValue(tc, "min.insync.replicas")
 			ctr.Topics = append(ctr.Topics, tc)
-			lib.tracer.Logf("[events] %s: attempting creation of topic %s", why, topic)
+			lib.tracer.Logf("[events] %s: attempting creation of topic %s with replicas %d and min.insync %d", why, topic, tc.ReplicationFactor, mir)
 			topicRequest = append(topicRequest, topic)
 		}
 		if outstanding == nil {
@@ -351,4 +362,20 @@ func (lib *LibraryNoDB) prepareTopicCreateRetry(seen *creatingTopic) (bool, erro
 	seen.errorTime = time.Time{}
 	seen.error = nil
 	return true, nil
+}
+
+func getIntConfigValue(tc kafka.TopicConfig, configName string) int64 {
+	i := generic.FirstMatchIndex(tc.ConfigEntries, func(e kafka.ConfigEntry) bool { return e.ConfigName == configName })
+	if i >= 0 {
+		v, _ := strconv.ParseInt(tc.ConfigEntries[i].ConfigValue, 10, 64)
+		return v
+	}
+	return 0
+}
+
+func setIntConfigValue(tc kafka.TopicConfig, configName string, value int64) []kafka.ConfigEntry {
+	return generic.ReplaceOrAppend(tc.ConfigEntries, kafka.ConfigEntry{
+		ConfigName:  configName,
+		ConfigValue: strconv.FormatInt(value, 10),
+	}, func(e kafka.ConfigEntry) bool { return e.ConfigName == configName })
 }

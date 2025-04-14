@@ -6,8 +6,8 @@ import (
 	"crypto/x509"
 	"encoding"
 	"encoding/json"
-	"io/ioutil"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -56,6 +56,7 @@ func (sc *TLSConfig) UnmarshalJSON(b []byte) error {
 	}
 	sc.Config = &wrapper.Config
 	if wrapper.DelayHostnameValidation {
+		//nolint:staticcheck // QF1008: could remove embedded field "Config" from selector
 		sc.Config.InsecureSkipVerify = true
 		err := sc.generateCustomTLSVerifier()
 		if err != nil {
@@ -157,7 +158,7 @@ func (tc *TLSConfig) generateCustomTLSVerifier() error {
 		"/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", // CentOS/RHEL 7
 		"/etc/ssl/cert.pem",                                 // Alpine Linux
 	} {
-		r, err := ioutil.ReadFile(certfile)
+		r, err := os.ReadFile(certfile)
 		if err != nil {
 			continue
 		}
@@ -169,6 +170,7 @@ func (tc *TLSConfig) generateCustomTLSVerifier() error {
 	if !certFound {
 		return errors.Alertf("could not load system certificate authority certificates")
 	}
+	//nolint:staticcheck // QF1008: could remove embedded field "Config" from selector
 	tc.Config.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 		opts := x509.VerifyOptions{
 			CurrentTime:   time.Now(),
@@ -194,6 +196,7 @@ func (tc *TLSConfig) generateCustomTLSVerifier() error {
 		_, err := certs[0].Verify(opts)
 		return errors.Wrap(err, "validate TLS peer certificate")
 	}
+	//nolint:staticcheck // QF1008: could remove embedded field "Config" from selector
 	tc.Config.VerifyConnection = func(cs tls.ConnectionState) error {
 		if len(cs.PeerCertificates) == 0 {
 			return nil

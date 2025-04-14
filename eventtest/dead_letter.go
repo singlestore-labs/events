@@ -9,12 +9,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/memsql/ntest"
+	"github.com/singlestore-labs/events"
+	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/stretchr/testify/require"
-
-	"singlestore.com/helios/events"
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/test/di"
-	"singlestore.com/helios/testutil"
 )
 
 func DeadLetterDiscardTest[
@@ -23,10 +20,10 @@ func DeadLetterDiscardTest[
 	DB AugmentAbstractDB[ID, TX],
 ](
 	ctx context.Context,
-	t di.T,
+	t ntest.T,
 	conn DB,
-	brokers di.Brokers,
-	cancel di.Cancel,
+	brokers Brokers,
+	cancel Cancel,
 ) {
 	DeadLetterTest(ctx, t, conn, brokers, cancel,
 		eventmodels.OnFailureDiscard, "DLD")
@@ -38,10 +35,10 @@ func DeadLetterBlockTest[
 	DB AugmentAbstractDB[ID, TX],
 ](
 	ctx context.Context,
-	t di.T,
+	t ntest.T,
 	conn DB,
-	brokers di.Brokers,
-	cancel di.Cancel,
+	brokers Brokers,
+	cancel Cancel,
 ) {
 	DeadLetterTest(ctx, t, conn, brokers, cancel,
 		eventmodels.OnFailureBlock, "DLB")
@@ -53,10 +50,10 @@ func DeadLetterSaveTest[
 	DB AugmentAbstractDB[ID, TX],
 ](
 	ctx context.Context,
-	t di.T,
+	t ntest.T,
 	conn DB,
-	brokers di.Brokers,
-	cancel di.Cancel,
+	brokers Brokers,
+	cancel Cancel,
 ) {
 	DeadLetterTest(ctx, t, conn, brokers, cancel,
 		eventmodels.OnFailureSave, "DLS")
@@ -68,10 +65,10 @@ func DeadLetterRetryLaterTest[
 	DB AugmentAbstractDB[ID, TX],
 ](
 	ctx context.Context,
-	t di.T,
+	t ntest.T,
 	conn DB,
-	brokers di.Brokers,
-	cancel di.Cancel,
+	brokers Brokers,
+	cancel Cancel,
 ) {
 	DeadLetterTest(ctx, t, conn, brokers, cancel,
 		eventmodels.OnFailureRetryLater, "DLRL")
@@ -83,10 +80,10 @@ func DeadLetterTest[
 	DB AugmentAbstractDB[ID, TX],
 ](
 	ctx context.Context,
-	t di.T,
+	t ntest.T,
 	conn DB,
-	brokers di.Brokers,
-	cancel di.Cancel,
+	brokers Brokers,
+	cancel Cancel,
 	onFailure eventmodels.OnFailure,
 	prefix string,
 ) {
@@ -141,7 +138,7 @@ func DeadLetterTest[
 	lib.ConsumeIdempotent(consumerGroup, onFailure, Name(t), topic.Handler(mkHandler("first")), events.WithTimeout(configuredTimeout))
 
 	firstCtx, cancelFirst := context.WithCancel(ctx)
-	lib.Configure(conn, testutil.NewTestingLogger(ntest.ExtraDetailLogger(baseT, prefix+"1")), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, prefix+"1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	produceDone, err := lib.CatchUpProduce(ctx, time.Second*5, 64)
 	defer func() {
 		t.Log("wait for produce done")
@@ -162,7 +159,7 @@ func DeadLetterTest[
 
 	WaitFor(ctx, t, "first delivery", firstSignal, DeliveryTimeout)
 	t.Log("sleeping...")
-	time.Sleep(configuredTimeout + LongerOnCI(time.Second*2, time.Minute))
+	time.Sleep(configuredTimeout + LongerOnCI(time.Second*2, time.Minute, time.Second*20))
 	t.Log("delivery should have failed by now")
 	cancelFirst()
 	WaitFor(ctx, t, "first library shutdown", firstDone, DeliveryTimeout)
@@ -173,7 +170,7 @@ func DeadLetterTest[
 	} else {
 		lib2.ConsumeIdempotent(consumerGroup, onFailure, Name(t), topic.Handler(mkHandler("second")), events.WithTimeout(configuredTimeout))
 	}
-	lib2.Configure(conn, testutil.NewTestingLogger(ntest.ExtraDetailLogger(baseT, prefix+"2")), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, prefix+"2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	// this assignment is thread-safe because lib1 is completely shut down and lib2 hasn't started yet
 	secondSignal := make(chan struct{})
 	signal = &secondSignal

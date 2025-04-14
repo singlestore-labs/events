@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -11,23 +12,18 @@ import (
 	"github.com/memsql/errors"
 	"github.com/muir/gwrap"
 	"github.com/segmentio/kafka-go"
-
-	"singlestore.com/helios/codegate"
-	"singlestore.com/helios/events/eventmodels"
-	"singlestore.com/helios/util/generic"
-	"singlestore.com/helios/util/interrupt"
-	"singlestore.com/helios/util/once"
-	"singlestore.com/helios/util/simultaneous"
+	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/generic"
+	"github.com/singlestore-labs/once"
+	"github.com/singlestore-labs/simultaneous"
 )
 
-const (
-	debugAck            = false
-	debugConsume        = true
-	debugConsumeStartup = true
-	debugBatching       = false
+var (
+	debugAck            = os.Getenv("EVENTS_DEBUG_ACK") == "true"
+	debugConsume        = os.Getenv("EVENTS_DEBUG_CONSUME") == "true"
+	debugConsumeStartup = os.Getenv("EVENTS_DEBUG_START_CONSUME") == "true"
+	debugBatching       = os.Getenv("EVENTS_DEBUG_BATCHING") == "true"
 )
-
-var fixLeakGate = codegate.New("EventsBackoffLeak")
 
 type eventLimiterType struct{}
 
@@ -74,7 +70,6 @@ func (lib *Library[ID, TX, DB]) StartConsuming(ctx context.Context) (started cha
 	if err != nil {
 		return nil, nil, err
 	}
-	ctx = interrupt.Strict().NewContext(ctx)
 	if lib.hasTxConsumers && lib.db == nil {
 		return nil, nil, errors.Alertf("attempt to consume exactly-once in an event library w/o a database connection")
 	}
@@ -550,11 +545,9 @@ func (lib *Library[ID, TX, DB]) callHandler(ctx context.Context, activeLimiter *
 	// is not appropriate for any other use.
 	var b backoff.Controller
 	backoffCtx := ctx
-	if fixLeakGate.Enabled() {
-		var backoffCancel func()
-		backoffCtx, backoffCancel = context.WithCancel(backoffCtx)
-		defer backoffCancel()
-	}
+	var backoffCancel func()
+	backoffCtx, backoffCancel = context.WithCancel(backoffCtx)
+	defer backoffCancel()
 	if handler.isDeadLetter {
 		b = deadLetterBackoffPolicy.Start(backoffCtx)
 	} else {
@@ -822,46 +815,30 @@ func (lib *Library[ID, TX, DB]) processCommits(softCtx context.Context, hardCtx 
 		if debugAck {
 			lib.tracer.Logf("[events] Debug: ack committing %d messages for %s", len(messages), consumerGroup)
 		}
-		if fixLeakGate.Enabled() {
-			if stopProcessing := func() bool {
-				// The lifetime of the backoff controller, b, and the cancel of the context that
-				// it uses need to align perfectly so that it functions correctly and does not
-				// hold onto resources beyond its scope. The context for this, backoffCtx,
-				// is not appropriate for any other use. This function exists just so that the
-				// defer will invoke at the right moment.
-				backoffCtx, backoffCancel := context.WithCancel(hardCtx)
-				defer backoffCancel() // required for cleanup
-				b := backoffPolicy.Start(backoffCtx)
-				for {
-					// either hardCtx or backoffCtx could be used here
-					err := reader.CommitMessages(hardCtx, messages...)
-					if err != nil {
-						_ = lib.RecordErrorNoWait("kafka commit error", errors.Errorf("consumer commit of (%d) messages failed: %w", len(messages), err))
-						if !backoff.Continue(b) {
-							lib.tracer.Logf("[events] consume done processing commits, dropping some")
-							return true
-						}
-						continue
-					}
-					return false
-				}
-			}(); stopProcessing {
-				return
-			}
-		} else {
-			b := backoffPolicy.Start(hardCtx)
+		if stopProcessing := func() bool {
+			// The lifetime of the backoff controller, b, and the cancel of the context that
+			// it uses need to align perfectly so that it functions correctly and does not
+			// hold onto resources beyond its scope. The context for this, backoffCtx,
+			// is not appropriate for any other use. This function exists just so that the
+			// defer will invoke at the right moment.
+			backoffCtx, backoffCancel := context.WithCancel(hardCtx)
+			defer backoffCancel() // required for cleanup
+			b := backoffPolicy.Start(backoffCtx)
 			for {
+				// either hardCtx or backoffCtx could be used here
 				err := reader.CommitMessages(hardCtx, messages...)
 				if err != nil {
 					_ = lib.RecordErrorNoWait("kafka commit error", errors.Errorf("consumer commit of (%d) messages failed: %w", len(messages), err))
 					if !backoff.Continue(b) {
 						lib.tracer.Logf("[events] consume done processing commits, dropping some")
-						return
+						return true
 					}
 					continue
 				}
-				break
+				return false
 			}
+		}(); stopProcessing {
+			return
 		}
 		clear(readyPartitions)
 		for _, ts := range sendTimestamps {

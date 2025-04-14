@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-
-	"singlestore.com/helios/trace"
 )
 
 const prefix = "events_"
@@ -187,7 +185,7 @@ var HandlerBatchQueued = mustRegister(prometheus.NewGaugeVec(
 	[]string{"handler_name"},
 ))
 
-var produceEventsLatency = trace.MustRegisterMetrics(prometheus.NewHistogramVec(
+var produceEventsLatency = mustRegister(prometheus.NewHistogramVec(
 	prometheus.HistogramOpts{
 		Name:    prefix + "post_tx_produce_seconds",
 		Buckets: timeBuckets,
