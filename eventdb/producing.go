@@ -1,3 +1,4 @@
+// Package eventdb has support functions for implementing the abstract types
 package eventdb
 
 import (
