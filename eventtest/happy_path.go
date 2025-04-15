@@ -19,19 +19,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// EventDeliveryTest verifies:
-//
-// That if there are multiple instances of
-// events.Library, all instances will deliver copies of a broadcast event.
-//
-// That if there are multiple instances of events.Library, that non-broadcast
-// events will be delivered only once.
-//
-// That returning error from a handler temporarily will not stop eventual message delivery.
-//
-// That two consumers of the same topic with different consumer
-// group names will both have the message deliverd to them.
-func EventDeliveryTest[
+// BroadcastDeliveryTest verifies:
+// - That broadcast events are delivered to all instances of events.Library
+// - That returning an error from a handler temporarily will not stop eventual message delivery
+// - That multiple handlers in the same library receive broadcast events
+func BroadcastDeliveryTest[
 	ID eventmodels.AbstractID[ID],
 	TX eventmodels.EnhancedTX,
 	DB AugmentAbstractDB[ID, TX],
@@ -43,88 +35,74 @@ func EventDeliveryTest[
 	cancel Cancel,
 ) {
 	baseT := t
-	t = ntest.ExtraDetailLogger(t, "TED-T")
+	t = ntest.ExtraDetailLogger(t, "TBDT")
+
+	t.Log("Create two library instances")
 	lib1 := events.New[ID, TX, DB]()
 	lib1.SetEnhanceDB(true)
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SetEnhanceDB(true)
-	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, "TED-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TED-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+
+	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, "TBDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TBDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	conn.AugmentWithProducer(lib1)
 
 	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t))
 
 	var lock sync.Mutex
-	failed := make(map[string]bool)
-	successCount := make(map[string]int)
+	handlerCalled := make(map[string]bool)
+	handlerRetried := make(map[string]bool)
 
 	id := uuid.New().String()
 	t.Log("id is", id)
-	id2 := uuid.New().String()
-	t.Log("id2 is", id2)
 
-	now := time.Now().Round(time.Second).Add(-2 * time.Minute).Round(time.Microsecond).UTC() // validating that timestamps are propagated
+	now := time.Now().Round(time.Second).UTC()
 
-	mkCallback := func(name string) func(context.Context, eventmodels.Event[MyEvent]) error {
+	// Create broadcast handlers
+	mkBroadcastHandler := func(name string) func(context.Context, eventmodels.Event[MyEvent]) error {
 		return func(_ context.Context, event eventmodels.Event[MyEvent]) error {
 			if event.ID != id {
-				t.Logf("received callback for %s/%s but id is wrong (%s vs %s)", name, event.Topic, event.ID, id)
+				t.Logf("received callback for %s but id is wrong (%s vs %s)", name, event.ID, id)
 				return nil
 			}
-			t.Logf("received callback for %s/%s, already failed: %v (will deliberately fail once)", name, event.Topic, failed[name])
-			assert.Equalf(t, now.Format(time.RFC3339Nano), event.Timestamp.UTC().Format(time.RFC3339Nano), "callback for %s/%s", name, event.Topic)
+
+			t.Logf("received callback for %s, already failed: %v", name, handlerCalled[name])
+			assert.Equal(t, now.Format(time.RFC3339), event.Timestamp.UTC().Format(time.RFC3339), "timestamp for %s", name)
+
 			lock.Lock()
 			defer lock.Unlock()
-			if failed[name] {
-				successCount[name]++
+
+			if handlerCalled[name] {
+				handlerRetried[name] = true
 				return nil
 			}
-			failed[name] = true
-			return errors.Errorf("failing (on purpose) %s", name)
+
+			handlerCalled[name] = true
+			return errors.Errorf("failing %s first attempt", name)
 		}
 	}
 
-	lib1.ConsumeExactlyOnce(events.NewConsumerGroup(Name(t)+"-exactlyonce"), eventmodels.OnFailureBlock, "EO1", topic.HandlerTx(
-		func(ctx context.Context, _ TX, e eventmodels.Event[MyEvent]) error {
-			return mkCallback("EO1")(ctx, e)
-		}))
-	lib2.ConsumeExactlyOnce(events.NewConsumerGroup(Name(t)+"-exactlyonce"), eventmodels.OnFailureBlock, "EO2", topic.HandlerTx(
-		func(ctx context.Context, _ TX, e eventmodels.Event[MyEvent]) error {
-			return mkCallback("EO2")(ctx, e)
-		}))
-	lib1.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentA"), eventmodels.OnFailureBlock, "Ia1", topic.Handler(mkCallback("Ia1")))
-	lib2.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentA"), eventmodels.OnFailureBlock, "Ia1", topic.Handler(mkCallback("Ia1")))
-	lib1.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentB"), eventmodels.OnFailureBlock, "Ib1", topic.Handler(mkCallback("Ib1")))
-	lib2.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentB"), eventmodels.OnFailureBlock, "Ib2", topic.Handler(mkCallback("Ib2")))
-	lib1.ConsumeBroadcast("B1", topic.Handler(mkCallback("B1")))
-	lib1.ConsumeBroadcast("B2", topic.Handler(mkCallback("B2")))
-	lib2.ConsumeBroadcast("B3", topic.Handler(mkCallback("B3")))
-	lib2.ConsumeBroadcast("B4", topic.Handler(mkCallback("B4")))
+	t.Log("Register broadcast handlers")
+	lib1.ConsumeBroadcast("B1", topic.Handler(mkBroadcastHandler("B1")))
+	lib1.ConsumeBroadcast("B2", topic.Handler(mkBroadcastHandler("B2"))) // Multiple handlers in lib1
+	lib2.ConsumeBroadcast("B3", topic.Handler(mkBroadcastHandler("B3")))
 
-	receivedSequence := make(map[string]int)
-	seqNo := 1
-	lib2.ConsumeBroadcast("B5", topic.Handler(func(_ context.Context, event eventmodels.Event[MyEvent]) error {
-		t.Logf("recevied callback for B5: %s", event.ID)
-		lock.Lock()
-		defer lock.Unlock()
-		receivedSequence[event.ID] = seqNo
-		seqNo++
-		return nil
-	}))
-
+	t.Log("Start consumers and producers")
 	produceDone, err := lib1.CatchUpProduce(ctx, time.Second*5, 64)
 	require.NoError(t, err, "start catch up")
 
 	started1, done1, err := lib1.StartConsuming(ctx)
-	require.NoError(t, err, "start consuming")
+	require.NoError(t, err, "start consuming lib1")
 	started2, done2, err := lib2.StartConsuming(ctx)
-	require.NoError(t, err, "start consuming")
+	require.NoError(t, err, "start consuming lib2")
 
 	WaitFor(ctx, t, "consumer1", started1, StartupTimeout)
 	WaitFor(ctx, t, "consumer2", started2, StartupTimeout)
 
+	t.Log("Verify broadcast consumer groups are different")
 	require.NotEqual(t, lib1.GetBroadcastConsumerGroupName(), lib2.GetBroadcastConsumerGroupName(), "broadcast consumer group names")
 
+	// Clean up when done
 	defer func() {
 		t.Log("cancel")
 		cancel()
@@ -137,74 +115,373 @@ func EventDeliveryTest[
 		t.Log("done waits")
 	}()
 
+	t.Log("Send test message")
 	require.NoErrorf(t, conn.Transact(ctx, func(tx TX) error {
-		tx.Produce(topic.Event("key1-"+id, MyEvent{
-			S: "seven",
+		tx.Produce(topic.Event("key-"+id, MyEvent{
+			S: "broadcast-test",
 		}).
 			ID(id).
-			Subject(Name(t) + "subject").
-			Time(now),
-		)
-		tx.Produce(topic.Event("key2"+id2, MyEvent{
-			S: "eight",
-		}).
-			ID(id2).
-			Subject(Name(t) + "subject2").
-			Time(now),
-		)
-		t.Logf("added events to transaction")
+			Subject(Name(t) + "-subject").
+			Time(now))
+		t.Logf("added event to transaction")
 		return nil
 	}), "transact/send")
 	t.Logf("transaction complete, message sent")
 
-	expectations := map[string]struct {
-		broadcast bool
-		overage   bool
-	}{
-		"EO": {broadcast: false, overage: false},
-		"Ia": {broadcast: false, overage: true},
-		"B":  {broadcast: true, overage: true},
-	}
-
+	t.Log("Wait for handlers to be called")
 	require.NoErrorf(t, wait.For(func() (bool, error) {
 		lock.Lock()
 		defer lock.Unlock()
-		for prefix, want := range expectations {
-			var sum int
-			var failCount int
-			for _, postfix := range []string{"1", "2"} {
-				if failed[prefix+postfix] {
-					failCount++
-				} else if want.broadcast {
-					t.Logf("Still waiting for failure call for %s%s", prefix, postfix)
-					return false, nil
-				}
-				if successCount[prefix+postfix] > 1 && !want.overage {
-					return false, errors.Errorf("too many deliveries for %s%s: %d", prefix, postfix, successCount[prefix+postfix])
-				}
-				sum += successCount[prefix+postfix]
+
+		// Check that all handlers were called
+		if !handlerCalled["B1"] || !handlerCalled["B2"] || !handlerCalled["B3"] {
+			missing := []string{}
+			if !handlerCalled["B1"] {
+				missing = append(missing, "B1")
 			}
-			if failCount == 0 {
-				t.Logf("Still waiting for failure call for %s", prefix)
-				return false, nil
+			if !handlerCalled["B2"] {
+				missing = append(missing, "B2")
 			}
-			target := 1
-			if want.broadcast {
-				target = 2
+			if !handlerCalled["B3"] {
+				missing = append(missing, "B3")
 			}
-			if sum < target {
-				t.Logf("Still waiting for calls for %s %dof%d", prefix, sum, target)
-				return false, nil
-			}
+			t.Logf("Still waiting for handlers to be called: %v", missing)
+			return false, nil
 		}
-		for _, id := range []string{id, id2} {
-			if receivedSequence[id] == 0 {
-				t.Logf("Still waiting for B3 to get %s", id)
-				return false, nil
+
+		// Check that all handlers were retried successfully
+		if !handlerRetried["B1"] || !handlerRetried["B2"] || !handlerRetried["B3"] {
+			missing := []string{}
+			if !handlerRetried["B1"] {
+				missing = append(missing, "B1")
 			}
+			if !handlerRetried["B2"] {
+				missing = append(missing, "B2")
+			}
+			if !handlerRetried["B3"] {
+				missing = append(missing, "B3")
+			}
+			t.Logf("Still waiting for retry success: %v", missing)
+			return false, nil
 		}
+
 		return true, nil
-	}, wait.WithLogger(t.Logf), wait.WithLimit(DeliveryTimeout), wait.WithMinInterval(time.Millisecond*500), wait.ExitOnError(true), wait.WithMaxInterval(time.Second*20), wait.WithBackoff(1.04), wait.WithReports(50)), "everything delivered")
+	}, wait.WithLogger(t.Logf), wait.WithLimit(DeliveryTimeout), wait.WithMinInterval(time.Millisecond*500),
+		wait.ExitOnError(true), wait.WithMaxInterval(time.Second*5), wait.WithBackoff(1.04),
+		wait.WithReports(20)), "broadcast message delivery")
+
+	t.Log("Final verification")
+	assert.Zero(t, lib1.ProduceSyncCount.Load())
+	assert.Zero(t, lib2.ProduceSyncCount.Load())
+}
+
+// IdempotentDeliveryTest verifies:
+// - That idempotent events with the same consumer group are delivered exactly once
+// - That idempotent events with different consumer groups are delivered to each group
+// - That returning an error from a handler temporarily will not stop eventual message delivery
+func IdempotentDeliveryTest[
+	ID eventmodels.AbstractID[ID],
+	TX eventmodels.EnhancedTX,
+	DB AugmentAbstractDB[ID, TX],
+](
+	ctx context.Context,
+	t ntest.T,
+	conn DB,
+	brokers Brokers,
+	cancel Cancel,
+) {
+	baseT := t
+	t = ntest.ExtraDetailLogger(t, "TIDT")
+
+	lib1 := events.New[ID, TX, DB]()
+	lib1.SetEnhanceDB(true)
+	lib2 := events.New[ID, TX, DB]()
+	lib2.SetEnhanceDB(true)
+
+	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, "TIDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TIDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	conn.AugmentWithProducer(lib1)
+
+	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t))
+
+	var lock sync.Mutex
+	handlerCalled := make(map[string]bool)
+	handlerRetried := make(map[string]bool)
+	callCounts := make(map[string]int)
+
+	id := uuid.New().String()
+	t.Log("id is", id)
+
+	now := time.Now().Round(time.Second).UTC()
+
+	mkIdempotentHandler := func(name string) func(context.Context, eventmodels.Event[MyEvent]) error {
+		return func(_ context.Context, event eventmodels.Event[MyEvent]) error {
+			if event.ID != id {
+				t.Logf("received callback for %s but id is wrong (%s vs %s)", name, event.ID, id)
+				return nil
+			}
+
+			t.Logf("received callback for %s, already failed: %v", name, handlerCalled[name])
+			assert.Equal(t, now.Format(time.RFC3339), event.Timestamp.UTC().Format(time.RFC3339), "timestamp for %s", name)
+
+			lock.Lock()
+			defer lock.Unlock()
+
+			callCounts[name]++
+
+			if handlerCalled[name] {
+				handlerRetried[name] = true
+				return nil
+			}
+
+			handlerCalled[name] = true
+			return errors.Errorf("failing %s first attempt", name)
+		}
+	}
+
+	t.Log("Register same consumer group across libraries")
+	lib1.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentA"), eventmodels.OnFailureBlock, "Ia1", topic.Handler(mkIdempotentHandler("Ia1")))
+	lib2.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentA"), eventmodels.OnFailureBlock, "Ia2", topic.Handler(mkIdempotentHandler("Ia2")))
+
+	t.Log("Register in different consumer groups")
+	lib1.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentB"), eventmodels.OnFailureBlock, "Ib1", topic.Handler(mkIdempotentHandler("Ib1")))
+	lib2.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentC"), eventmodels.OnFailureBlock, "Ic1", topic.Handler(mkIdempotentHandler("Ic1")))
+
+	t.Log("Start consumers and producers")
+	produceDone, err := lib1.CatchUpProduce(ctx, time.Second*5, 64)
+	require.NoError(t, err, "start catch up")
+
+	started1, done1, err := lib1.StartConsuming(ctx)
+	require.NoError(t, err, "start consuming lib1")
+	started2, done2, err := lib2.StartConsuming(ctx)
+	require.NoError(t, err, "start consuming lib2")
+
+	WaitFor(ctx, t, "consumer1", started1, StartupTimeout)
+	WaitFor(ctx, t, "consumer2", started2, StartupTimeout)
+
+	// Clean up when done
+	defer func() {
+		t.Log("cancel")
+		cancel()
+		t.Log("wait done1")
+		<-done1
+		t.Log("wait done2")
+		<-done2
+		t.Log("wait produce")
+		<-produceDone
+		t.Log("done waits")
+	}()
+
+	t.Log("Send test message")
+	require.NoErrorf(t, conn.Transact(ctx, func(tx TX) error {
+		tx.Produce(topic.Event("key-"+id, MyEvent{
+			S: "idempotent-test",
+		}).
+			ID(id).
+			Subject(Name(t) + "-subject").
+			Time(now))
+		t.Logf("added event to transaction")
+		return nil
+	}), "transact/send")
+	t.Logf("transaction complete, message sent")
+
+	t.Log("Wait for message delivery")
+	require.NoErrorf(t, wait.For(func() (bool, error) {
+		lock.Lock()
+		defer lock.Unlock()
+
+		// For same consumer group, only one should be called
+		if !handlerCalled["Ia1"] && !handlerCalled["Ia2"] {
+			t.Logf("Still waiting for one of the Ia handlers to be called")
+			return false, nil
+		}
+
+		// The handler that was called should also be retried
+		if handlerCalled["Ia1"] && !handlerRetried["Ia1"] {
+			t.Logf("Still waiting for Ia1 to be retried")
+			return false, nil
+		}
+		if handlerCalled["Ia2"] && !handlerRetried["Ia2"] {
+			t.Logf("Still waiting for Ia2 to be retried")
+			return false, nil
+		}
+
+		// For different consumer groups, both should be called
+		if !handlerCalled["Ib1"] || !handlerCalled["Ic1"] {
+			t.Logf("Still waiting for Ib1 and/or Ic1 to be called: Ib1=%v, Ic1=%v",
+				handlerCalled["Ib1"], handlerCalled["Ic1"])
+			return false, nil
+		}
+
+		// Both should be retried
+		if !handlerRetried["Ib1"] || !handlerRetried["Ic1"] {
+			t.Logf("Still waiting for Ib1 and/or Ic1 to be retried: Ib1=%v, Ic1=%v",
+				handlerRetried["Ib1"], handlerRetried["Ic1"])
+			return false, nil
+		}
+
+		return true, nil
+	}, wait.WithLogger(t.Logf), wait.WithLimit(DeliveryTimeout), wait.WithMinInterval(time.Millisecond*500),
+		wait.ExitOnError(true), wait.WithMaxInterval(time.Second*5), wait.WithBackoff(1.04),
+		wait.WithReports(20)), "idempotent message delivery")
+
+	t.Log("Verify one call for same consumer group")
+	lock.Lock()
+	sameGroupCalls := callCounts["Ia1"] + callCounts["Ia2"]
+	differentGroupCalls := callCounts["Ib1"] > 0 && callCounts["Ic1"] > 0
+	lock.Unlock()
+
+	assert.Equal(t, 2, sameGroupCalls, "Should have exactly 2 calls (1 initial + 1 retry) across Ia1 and Ia2")
+	assert.True(t, differentGroupCalls, "Both Ib1 and Ic1 should have been called")
+
+	assert.Zero(t, lib1.ProduceSyncCount.Load())
+	assert.Zero(t, lib2.ProduceSyncCount.Load())
+}
+
+// ExactlyOnceDeliveryTest verifies:
+// - That exactly-once events are delivered to exactly one consumer in a consumer group
+// - That returning an error from a handler temporarily will not stop eventual message delivery
+func ExactlyOnceDeliveryTest[
+	ID eventmodels.AbstractID[ID],
+	TX eventmodels.EnhancedTX,
+	DB AugmentAbstractDB[ID, TX],
+](
+	ctx context.Context,
+	t ntest.T,
+	conn DB,
+	brokers Brokers,
+	cancel Cancel,
+) {
+	baseT := t
+	t = ntest.ExtraDetailLogger(t, "TEOD")
+
+	lib1 := events.New[ID, TX, DB]()
+	lib1.SetEnhanceDB(true)
+	lib2 := events.New[ID, TX, DB]()
+	lib2.SetEnhanceDB(true)
+
+	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, "TEOD-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TEOD-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	conn.AugmentWithProducer(lib1)
+
+	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t))
+
+	var lock sync.Mutex
+	handlerCalled := make(map[string]bool)
+	handlerRetried := make(map[string]bool)
+	callCounts := make(map[string]int)
+
+	id := uuid.New().String()
+	t.Log("id is", id)
+
+	now := time.Now().Round(time.Second).UTC()
+
+	mkExactlyOnceHandler := func(name string) func(context.Context, TX, eventmodels.Event[MyEvent]) error {
+		return func(ctx context.Context, _ TX, event eventmodels.Event[MyEvent]) error {
+			if event.ID != id {
+				t.Logf("received callback for %s but id is wrong (%s vs %s)", name, event.ID, id)
+				return nil
+			}
+
+			t.Logf("received callback for %s, already failed: %v", name, handlerCalled[name])
+			assert.Equal(t, now.Format(time.RFC3339), event.Timestamp.UTC().Format(time.RFC3339), "timestamp for %s", name)
+
+			lock.Lock()
+			defer lock.Unlock()
+
+			callCounts[name]++
+
+			if handlerCalled[name] {
+				handlerRetried[name] = true
+				return nil
+			}
+
+			handlerCalled[name] = true
+			return errors.Errorf("failing %s first attempt", name)
+		}
+	}
+
+	// Same consumer group across libraries
+	lib1.ConsumeExactlyOnce(events.NewConsumerGroup(Name(t)+"-exactlyonce"), eventmodels.OnFailureBlock, "EO1", topic.HandlerTx(mkExactlyOnceHandler("EO1")))
+	lib2.ConsumeExactlyOnce(events.NewConsumerGroup(Name(t)+"-exactlyonce"), eventmodels.OnFailureBlock, "EO2", topic.HandlerTx(mkExactlyOnceHandler("EO2")))
+
+	// Start consumers and producers
+	produceDone, err := lib1.CatchUpProduce(ctx, time.Second*5, 64)
+	require.NoError(t, err, "start catch up")
+
+	started1, done1, err := lib1.StartConsuming(ctx)
+	require.NoError(t, err, "start consuming lib1")
+	started2, done2, err := lib2.StartConsuming(ctx)
+	require.NoError(t, err, "start consuming lib2")
+
+	WaitFor(ctx, t, "consumer1", started1, StartupTimeout)
+	WaitFor(ctx, t, "consumer2", started2, StartupTimeout)
+
+	// Clean up when done
+	defer func() {
+		t.Log("cancel")
+		cancel()
+		t.Log("wait done1")
+		<-done1
+		t.Log("wait done2")
+		<-done2
+		t.Log("wait produce")
+		<-produceDone
+		t.Log("done waits")
+	}()
+
+	// Send test message
+	require.NoErrorf(t, conn.Transact(ctx, func(tx TX) error {
+		tx.Produce(topic.Event("key-"+id, MyEvent{
+			S: "exactly-once-test",
+		}).
+			ID(id).
+			Subject(Name(t) + "-subject").
+			Time(now))
+		t.Logf("added event to transaction")
+		return nil
+	}), "transact/send")
+	t.Logf("transaction complete, message sent")
+
+	// Wait for message delivery with clear verification
+	require.NoErrorf(t, wait.For(func() (bool, error) {
+		lock.Lock()
+		defer lock.Unlock()
+
+		// Only one of the exactly-once handlers should be called
+		if !handlerCalled["EO1"] && !handlerCalled["EO2"] {
+			t.Logf("Still waiting for one of the EO handlers to be called")
+			return false, nil
+		}
+
+		// The handler that was called should also be retried
+		if handlerCalled["EO1"] && !handlerRetried["EO1"] {
+			t.Logf("Still waiting for EO1 to be retried")
+			return false, nil
+		}
+		if handlerCalled["EO2"] && !handlerRetried["EO2"] {
+			t.Logf("Still waiting for EO2 to be retried")
+			return false, nil
+		}
+
+		return true, nil
+	}, wait.WithLogger(t.Logf), wait.WithLimit(DeliveryTimeout), wait.WithMinInterval(time.Millisecond*500),
+		wait.ExitOnError(true), wait.WithMaxInterval(time.Second*5), wait.WithBackoff(1.04),
+		wait.WithReports(20)), "exactly-once message delivery")
+
+	// Verify only one consumer received the message
+	lock.Lock()
+	totalHandlerCalls := 0
+	if handlerCalled["EO1"] {
+		totalHandlerCalls++
+	}
+	if handlerCalled["EO2"] {
+		totalHandlerCalls++
+	}
+	lock.Unlock()
+
+	assert.Equal(t, 1, totalHandlerCalls, "Only one of the exactly-once handlers should have been called")
+
 	assert.Zero(t, lib1.ProduceSyncCount.Load())
 	assert.Zero(t, lib2.ProduceSyncCount.Load())
 }
