@@ -1,3 +1,4 @@
+// Package eventtest has abstract tests to validate database implementations
 package eventtest
 
 import (

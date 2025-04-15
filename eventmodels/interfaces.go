@@ -1,3 +1,4 @@
+// Package eventmodels has the interfaces needed to use the events package
 package eventmodels
 
 import (

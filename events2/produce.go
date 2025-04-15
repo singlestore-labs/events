@@ -1,3 +1,4 @@
+// Package events2 implements the abstract types using SingleStore
 package events2
 
 import (

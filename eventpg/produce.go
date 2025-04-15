@@ -1,3 +1,4 @@
+// Package eventpg implements the abstract types for PostgreSQL
 package eventpg
 
 import (
