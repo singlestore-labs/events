@@ -189,7 +189,7 @@ delivered and the handler may be called again in the future.
 
 ```go
 eventLib.ConsumeExactlyOnce(StateServerConsumer, eventmodels.OnFailureDiscard, "send-cluster-created-email", MyTopic.HandlerTx(
-	func(ctx context.Context, tx *data.Transaction, e eventmodels.Event[PayloadForMyTopic]) error {
+	func(ctx context.Context, tx *sql.Tx, e eventmodels.Event[PayloadForMyTopic]) error {
 		// do something
 		return nil
 	}))
