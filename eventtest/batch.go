@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -65,6 +66,7 @@ func BatchDeliveryTest[
 		}
 		infoBlocks[name] = info
 		wg.Add(1)
+		var doneCalled atomic.Int32
 		return func(ctx context.Context, events []eventmodels.Event[myType]) error {
 			select {
 			case <-produceComplete:
@@ -82,12 +84,10 @@ func BatchDeliveryTest[
 			if len(events) > info.maxBatchSize {
 				info.maxBatchSize = len(events)
 			}
-			if info.totalDelivered < eventsToSend {
-				info.totalDelivered += len(events)
-				if info.totalDelivered >= eventsToSend {
-					t.Logf("completed deliveries for %s: %d", name, info.totalDelivered)
-					wg.Done()
-				}
+			info.totalDelivered += len(events)
+			if info.totalDelivered >= eventsToSend && doneCalled.Add(1) == 1 {
+				t.Logf("completed deliveries for %s: %d", name, info.totalDelivered)
+				wg.Done()
 			}
 			return nil
 		}
