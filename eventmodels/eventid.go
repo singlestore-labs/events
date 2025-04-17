@@ -3,8 +3,8 @@ package eventmodels
 import (
 	"database/sql/driver"
 
+	baseuuid "github.com/gofrs/uuid/v5"
 	googleuuid "github.com/google/uuid"
-	baseuuid "github.com/satori/go.uuid"
 )
 
 // BinraryEventID is a uuid type that presents itself the the sql driver as binary bytes.
@@ -29,6 +29,12 @@ type StringEventID struct {
 	baseuuid.UUID
 }
 
-func (u StringEventID) New() StringEventID { return StringEventID{UUID: baseuuid.NewV4()} }
+func (u StringEventID) New() StringEventID {
+	n, err := baseuuid.NewV4()
+	if err != nil {
+		panic(err)
+	}
+	return StringEventID{UUID: n}
+}
 
 var _ AbstractID[StringEventID] = &StringEventID{}
