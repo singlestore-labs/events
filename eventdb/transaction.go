@@ -7,6 +7,7 @@ import (
 	"github.com/memsql/errors"
 
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/generic"
 )
 
 // BasicTX is what's needed from a transaction in WrapTransaction
@@ -33,7 +34,7 @@ type ComboDB[ID eventmodels.AbstractID[ID], TX BasicTX] interface {
 	eventmodels.AbstractDB[ID, TX]
 }
 
-type SaveEventsFunc[ID eventmodels.AbstractID[ID], TX BasicTX] func(context.Context, eventmodels.Tracer, TX, ...eventmodels.ProducingEvent) ([]ID, error)
+type SaveEventsFunc[ID eventmodels.AbstractID[ID], TX BasicTX] func(context.Context, eventmodels.Tracer, TX, ...eventmodels.ProducingEvent) (map[string][]ID, error)
 
 // Transact implements a Transact method as needed by AbstractDB (in ComboDB).
 // It does not call itself recursively and insteads depends upon BeginTx
@@ -44,7 +45,7 @@ func Transact[ID eventmodels.AbstractID[ID], TX BasicTX, DB ComboDB[ID, TX]](
 	saveEvents SaveEventsFunc[ID, TX],
 	producer eventmodels.Producer[ID, TX],
 ) error {
-	ids, err := WrapTransaction[ID, TX, DB](ctx, db, tracer, f, saveEvents)
+	ids, err := WrapTransaction[ID, TX, DB](ctx, db, tracer, f, saveEvents, producer)
 	if err != nil {
 		return err
 	}
@@ -52,7 +53,7 @@ func Transact[ID eventmodels.AbstractID[ID], TX BasicTX, DB ComboDB[ID, TX]](
 		if producer != nil {
 			err = producer.ProduceFromTable(ctx, ids)
 		} else {
-			_, err = db.ProduceSpecificTxEvents(ctx, ids)
+			_, err = db.ProduceSpecificTxEvents(ctx, generic.CombineSlices(generic.Values(ids)...))
 		}
 	}
 	return err
@@ -65,8 +66,9 @@ func WrapTransaction[ID eventmodels.AbstractID[ID], TX BasicTX, DB BasicDB[TX]](
 	ctx context.Context, db DB, tracer eventmodels.Tracer,
 	f func(TX) error,
 	saveEvents SaveEventsFunc[ID, TX],
-) ([]ID, error) {
-	var ids []ID
+	producer eventmodels.Producer[ID, TX],
+) (map[string][]ID, error) {
+	var ids map[string][]ID
 	err := func() (err error) {
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
@@ -94,6 +96,21 @@ func WrapTransaction[ID eventmodels.AbstractID[ID], TX BasicTX, DB BasicDB[TX]](
 			return err
 		}
 		if pending := tx.GetPendingEvents(); len(pending) != 0 {
+			if producer != nil {
+				topics := make([]string, 0, len(pending))
+				seen := make(map[string]struct{}, len(pending))
+				for _, event := range pending {
+					topic := event.GetTopic()
+					if _, ok := seen[topic]; !ok {
+						seen[topic] = struct{}{}
+						topics = append(topics, topic)
+					}
+				}
+				err := producer.ValidateTopics(ctx, topics)
+				if err != nil {
+					return err
+				}
+			}
 			var err error
 			ids, err = saveEvents(ctx, tracer, tx, pending...)
 			if err != nil {

@@ -109,16 +109,17 @@ func GenerateSharedTestMatrix[
 	DB AugmentAbstractDB[ID, TX],
 ]() map[string]nject.Provider {
 	return map[string]nject.Provider{
-		"BatchDelivery":        nject.Provide("BD", BatchDeliveryTest[ID, TX, DB]),
-		"BroadcastDelivery":    nject.Provide("BCD", BroadcastDeliveryTest[ID, TX, DB]),
-		"CloudEventEncoding":   nject.Provide("CEET", CloudEventEncodingTest[ID, TX, DB]),
-		"DeadLetterBlock":      nject.Provide("DLB", DeadLetterBlockTest[ID, TX, DB]),
-		"DeadLetterDiscard":    nject.Provide("DLD", DeadLetterDiscardTest[ID, TX, DB]),
-		"DeadLetterRetryLater": nject.Provide("DLRL", DeadLetterRetryLaterTest[ID, TX, DB]),
-		"DeadLetterSave":       nject.Provide("DLS", DeadLetterSaveTest[ID, TX, DB]),
-		"ErrorWhenMisused":     nject.Provide("EWM", ErrorWhenMisusedTest[ID, TX, DB]),
-		"ExactlyOnceDelivery":  nject.Provide("EOD", ExactlyOnceDeliveryTest[ID, TX, DB]),
-		"IdempotentDelivery":   nject.Provide("ID", IdempotentDeliveryTest[ID, TX, DB]),
-		"Notifier":             nject.Provide("N", EventNotifierTest[ID, TX, DB]),
+		"BatchDelivery":         nject.Provide("BD", BatchDeliveryTest[ID, TX, DB]),
+		"BroadcastDelivery":     nject.Provide("BCD", BroadcastDeliveryTest[ID, TX, DB]),
+		"CloudEventEncoding":    nject.Provide("CEET", CloudEventEncodingTest[ID, TX, DB]),
+		"ComprehensiveNotifier": nject.Provide("N", EventComprehensiveNotifierTest[ID, TX, DB]),
+		"DeadLetterBlock":       nject.Provide("DLB", DeadLetterBlockTest[ID, TX, DB]),
+		"DeadLetterDiscard":     nject.Provide("DLD", DeadLetterDiscardTest[ID, TX, DB]),
+		"DeadLetterRetryLater":  nject.Provide("DLRL", DeadLetterRetryLaterTest[ID, TX, DB]),
+		"DeadLetterSave":        nject.Provide("DLS", DeadLetterSaveTest[ID, TX, DB]),
+		"ErrorWhenMisused":      nject.Provide("EWM", ErrorWhenMisusedTest[ID, TX, DB]),
+		"ExactlyOnceDelivery":   nject.Provide("EOD", ExactlyOnceDeliveryTest[ID, TX, DB]),
+		"IdempotentDelivery":    nject.Provide("ID", IdempotentDeliveryTest[ID, TX, DB]),
+		"UnfilteredNotifier":    nject.Provide("UN", EventUnfilteredNotifierTest[ID, TX, DB]),
 	}
 }

@@ -90,31 +90,28 @@ jobs:
       - name: Build
         run: go build -v ./...
 
-      - name: Test
+      - name: Test and Coverage
         env:
           EVENTS_S2TEST_DSN: "root:test@tcp(127.0.0.1:3306)/eventstest?tls=false&parseTime=true"
           EVENTS_KAFKA_BROKERS: "localhost:9092"
-          EVENTS_DEBUG_NOTIFY: "true"
-          EVENTS_DEBUG_PRODUCE: "true"
-          EVENTS_DEBUG_DELIVERY: "true"
-          EVENTS_DEBUG_ACK: "false"
-          EVENTS_DEBUG_CONSUME: "true"
-          EVENTS_DEBUG_START_CONSUME: "true"
-          EVENTS_DEBUG_BATCHING: "true"
-        run: go test ./events2/... -v --parallel 3
-
-      - name: Run Coverage
-        env:
-          EVENTS_S2TEST_DSN: "root:test@tcp(127.0.0.1:3306)/eventstest?tls=false&parseTime=true"
-          EVENTS_KAFKA_BROKERS: "localhost:9092"
-          EVENTS_DEBUG_NOTIFY: "true"
-          EVENTS_DEBUG_PRODUCE: "true"
-          EVENTS_DEBUG_DELIVERY: "true"
-          EVENTS_DEBUG_ACK: "true"
-          EVENTS_DEBUG_CONSUME: "true"
-          EVENTS_DEBUG_START_CONSUME: "true"
-          EVENTS_DEBUG_BATCHING: "true"
-        run: go test -coverprofile=coverage.txt -covermode=atomic -coverpkg=github.com/singlestore-labs/events/... ./events2/... --parallel 3
+        run: |
+          export EVENTS_DEBUG_NOTIFY="true"
+          export EVENTS_DEBUG_PRODUCE="true"
+          export EVENTS_DEBUG_DELIVERY="true"
+          export EVENTS_DEBUG_ACK="true"
+          export EVENTS_DEBUG_CONSUME="true"
+          export EVENTS_DEBUG_START_CONSUME="true"
+          export EVENTS_DEBUG_BATCHING="true"
+          go test -coverprofile=coverage1.txt -covermode=atomic -coverpkg=github.com/singlestore-labs/events/... -v ./events2/... 
+          export EVENTS_DEBUG_NOTIFY="false"
+          export EVENTS_DEBUG_PRODUCE="false"
+          export EVENTS_DEBUG_DELIVERY="false"
+          export EVENTS_DEBUG_ACK="false"
+          export EVENTS_DEBUG_CONSUME="false"
+          export EVENTS_DEBUG_START_CONSUME="false"
+          export EVENTS_DEBUG_BATCHING="false"
+          go test -coverprofile=coverage2.txt -covermode=atomic -coverpkg=github.com/singlestore-labs/events/... ./events2/... 
+          cat coverage1.txt coverage2.txt > coverage.txt
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

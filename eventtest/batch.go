@@ -11,11 +11,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/memsql/errors"
 	"github.com/memsql/ntest"
+	"github.com/segmentio/kafka-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/singlestore-labs/events"
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/wait"
 )
 
 const (
@@ -49,10 +51,11 @@ func BatchDeliveryTest[
 	baseT := t
 	t = ntest.ExtraDetailLogger(t, "TBD")
 
-	consumerGroup := events.NewConsumerGroup(Name(t))
+	consumerGroup := events.NewConsumerGroup(Name(t) + "Topic")
 	lib := events.New[ID, TX, DB]()
 	conn.AugmentWithProducer(lib)
-	topic := eventmodels.BindTopicTx[myType, ID, TX, DB](Name(t))
+	topic := eventmodels.BindTopicTx[myType, ID, TX, DB](Name(t) + "Topic")
+	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
 
 	infoBlocks := make(map[string]*deliveryInfoBlock)
 
@@ -95,7 +98,7 @@ func BatchDeliveryTest[
 
 	lib.ConsumeIdempotent(consumerGroup, eventmodels.OnFailureDiscard, Name(t)+"-CI", topic.BatchHandler(mkHandler("idempotent")))
 
-	lib.ConsumeBroadcast(Name(t), topic.BatchHandler(mkHandler("broadcast")))
+	lib.ConsumeBroadcast(Name(t)+"CB", topic.BatchHandler(mkHandler("broadcast")))
 
 	eoh := mkHandler("exactlyOnce")
 	lib.ConsumeExactlyOnce(consumerGroup, eventmodels.OnFailureDiscard, Name(t)+"-CEO", topic.BatchHandlerTx(
@@ -134,8 +137,16 @@ func BatchDeliveryTest[
 		}).ID(id)
 		t.Logf("generate event %d %s", i, id)
 	}
-	err = lib.Produce(ctx, eventmodels.ProduceImmediate, toSend...)
-	require.NoError(t, err)
+
+	t.Log("producing may take a few tries for brand new topics")
+	require.NoError(t, wait.For(func() (bool, error) {
+		err := lib.Produce(ctx, eventmodels.ProduceImmediate, toSend...)
+		if err != nil {
+			t.Logf("got error trying to produce: %v", err)
+			return false, err
+		}
+		return true, nil
+	}, wait.ExitOnError(false), wait.WithLimit(time.Second*60)))
 
 	t.Log("all events produced")
 	close(produceComplete)

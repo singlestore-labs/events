@@ -83,9 +83,9 @@ func (lib *Library[ID, TX, DB]) StartConsuming(ctx context.Context) (started cha
 			lib.tracer.Logf("[events] Event handlers are no longer stuck")
 		},
 	)
-	doneChan := make(chan struct{})
-	startChan := make(chan struct{})
+	// allDone tracks closing down the many threads that are involved in consuming topics
 	var allDone sync.WaitGroup
+	// allStarted tracks getting the consumers ready
 	var allStarted sync.WaitGroup
 	if debugConsumeStartup {
 		lib.tracer.Logf("[events] Debug: consume startwait +%d for readers", len(lib.readers))
@@ -101,7 +101,8 @@ func (lib *Library[ID, TX, DB]) StartConsuming(ctx context.Context) (started cha
 			lib.tracer.Logf("[events] Debug: consume startwait +1 for broadcast")
 			lib.tracer.Logf("[events] Debug: allDone +1 broadcast")
 		}
-		allStarted.Add(1)
+		allStarted.Add(1) // for the group startup
+		allStarted.Add(1) // for receiving the first broadcast message
 		err := lib.consumeBroadcast(ctx, &allStarted, &allDone)
 		if err != nil {
 			return nil, nil, err
@@ -110,6 +111,8 @@ func (lib *Library[ID, TX, DB]) StartConsuming(ctx context.Context) (started cha
 	for consumerGroup, group := range lib.readers {
 		go lib.startConsumingGroup(ctx, consumerGroup, group, limiter, false, &allStarted, &allDone, false)
 	}
+	doneChan := make(chan struct{})
+	startChan := make(chan struct{})
 	go func() {
 		allDone.Wait()
 		if debugConsumeStartup {
@@ -127,63 +130,56 @@ func (lib *Library[ID, TX, DB]) StartConsuming(ctx context.Context) (started cha
 
 // startConsumingGroup reads messages and calls handlers for a single consumer group
 //
-// consume() exists on idleness because sometimes readers hang. startConsumingGroup
+// consume() exits on idleness because sometimes readers hang. startConsumingGroup
 // calls consume() over and over.
 func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consumerGroup consumerGroupName, group *group, limiter *limit, isBroadcast bool, allStarted *sync.WaitGroup, allDone *sync.WaitGroup, isDeadLetter bool) {
 	if debugConsumeStartup {
 		lib.tracer.Logf("[events] Debug: consume startwait 0 waiting for %s %s", consumerGroup, group.Describe())
 	}
-	started := once.New(func() {
-		if debugConsumeStartup {
+	// startedSideEffects should be called only once the consumer is started
+	startedSideEffects := once.New(func() {
+		if isBroadcast {
+			allDone.Add(1)
+			if debugConsumeStartup {
+				lib.tracer.Logf("[events] Debug: allDone +1 for broadcast heartbeat %s %s", consumerGroup, group.Describe())
+			}
+			go lib.sendBroadcastHeartbeat(ctx, allDone)
+		} else if debugConsumeStartup {
 			lib.tracer.Logf("[events] Debug: consume startwait -1 ... started() called for %s %s", consumerGroup, group.Describe())
 		}
 		allStarted.Done()
 	})
 	defer func() {
-		started.Do()
+		startedSideEffects.Do()
 		if debugConsumeStartup {
 			lib.tracer.Logf("[events] Debug: allDone -1 for consumer %s %s", consumerGroup, group.Describe())
 		}
 		allDone.Done()
 	}()
+	for {
+		topics := generic.Keys(group.topics)
+		if debugConsumeStartup {
+			lib.tracer.Logf("[events] Debug: pre-creating topics: %v", topics)
+		}
+		err := lib.precreateTopicsForConsuming(ctx, consumerGroup, topics)
+		if err != nil {
+			_ = lib.RecordError("preCreateTopicsForConsume", err)
+			continue
+		}
+		if debugConsumeStartup {
+			lib.tracer.Logf("[events] Debug: topics pre-created")
+		}
+		break
+	}
 	for _, topicHandler := range group.topics {
 		for name, handler := range topicHandler.handlers {
 			handler.consumerGroup = consumerGroup
 			topicHandler.handlers[name] = handler
 		}
 	}
-	lib.precreateTopicsForConsuming(ctx, consumerGroup, generic.Keys(group.topics))
-	switch {
-	case isBroadcast:
-		allDone.Add(1)
-		if debugConsumeStartup {
-			lib.tracer.Logf("[events] Debug: allDone +1 for broadcast heartbeat %s %s", consumerGroup, group.Describe())
-		}
-		go lib.sendBroadcastHeartbeat(ctx, allDone)
-	case !isDeadLetter:
+	if !isDeadLetter {
 		lib.startDeadLetterConsumers(ctx, consumerGroup, group, limiter, allStarted, allDone)
 	}
-	for lib.consume(ctx, consumerGroup, group, limiter, isBroadcast, allDone, started) {
-	}
-}
-
-// consume starts one reader and uses it to fetch, process, and acknowledge messages.
-//
-// If message fetching times out, consume exits so that a new reader can be created since
-// it seems that sometimes readers hang.
-//
-// Careful management of waitGroups and contexts means that consume() doesn't exit until all message
-// handlers are done and if those message handlers completed processing of messages, consume waits for
-// the processCommits go routine to finish too.
-//
-// Each message is processed in a separate go routine so that multiple messages can be consumed
-// quickly. The number of active go routines is limited by a limiter that is shared across all
-// consumers.
-//
-// When a handler is done with a message, it writes it to a channel that is read by the processCommits
-// go routine. Messages are explicitly committed in order by partition.
-func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consumerGroupName, group *group, activeLimiter *limit, isBroadcast bool, allDone *sync.WaitGroup, started *once.Once) bool {
-	// set zero counters for metrics
 	cg := string(consumerGroup)
 	if isBroadcast {
 		cg = "broadcast"
@@ -205,6 +201,28 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 			}
 		}
 	}
+	var priorSuccess bool
+	for lib.consume(ctx, consumerGroup, group, limiter, isBroadcast, allDone, allStarted, startedSideEffects, &priorSuccess) {
+	}
+}
+
+// consume starts one reader and uses it to fetch, process, and acknowledge messages.
+//
+// If message fetching times out, consume exits so that a new reader can be created since
+// it seems that sometimes readers hang.
+//
+// Careful management of waitGroups and contexts means that consume() doesn't exit until all message
+// handlers are done and if those message handlers completed processing of messages, consume waits for
+// the processCommits go routine to finish too.
+//
+// Each message is processed in a separate go routine so that multiple messages can be consumed
+// quickly. The number of active go routines is limited by a limiter that is shared across all
+// consumers.
+//
+// When a handler is done with a message, it writes it to a channel that is read by the processCommits
+// go routine. Messages are explicitly committed in order by partition.
+func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consumerGroupName, group *group, activeLimiter *limit, isBroadcast bool, allDone *sync.WaitGroup, allStarted *sync.WaitGroup, startedSideEffects *once.Once, priorSuccess *bool) bool {
+	// set zero counters for metrics
 	readerConfig := kafka.ReaderConfig{
 		Brokers:     lib.brokers,
 		GroupID:     consumerGroup.String(),
@@ -213,8 +231,15 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 		Dialer:      lib.dialer(),
 		StartOffset: kafka.FirstOffset,
 	}
+	cg := string(consumerGroup)
 	if isBroadcast {
-		readerConfig.StartOffset = kafka.LastOffset
+		cg = "broadcast"
+		if !*priorSuccess {
+			if debugConsumeStartup {
+				lib.tracer.Logf("[events] Debug: consume %s setting start offset = last offset", consumerGroup)
+			}
+			readerConfig.StartOffset = kafka.LastOffset
+		}
 		if _, ok := group.topics[heartbeatTopic.Topic()]; !ok {
 			// we don't actually need a handler, just need to subscribe to the topic
 			readerConfig.GroupTopics = append(readerConfig.GroupTopics, heartbeatTopic.Topic())
@@ -234,7 +259,7 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 	commitsSoftCtx, commitsCancel := context.WithCancel(ctx)
 	var outstandingWork sync.WaitGroup
 	if debugConsumeStartup {
-		lib.tracer.Logf("[events] Debug: consume readerconfig topics %v", readerConfig.GroupTopics)
+		lib.tracer.Logf("[events] Debug: consume %s readerconfig topics %v", consumerGroup, readerConfig.GroupTopics)
 	}
 	reader := kafka.NewReader(readerConfig)
 	defer func() {
@@ -252,9 +277,7 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 	}()
 
 	lib.tracer.Logf("[events] consumer started for consumerGroup %s for %s", consumerGroup, group.Describe())
-	if !isBroadcast {
-		started.Do()
-	}
+	startedSideEffects.Do()
 	sequenceNumbers := make(map[int]int)
 	// done is used to commit offsets for messages that have been processed
 	done := make(chan *messageAndSequenceNumber, commitQueueDepth)
@@ -300,9 +323,18 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 			shortCancel()
 			return true
 		}
+		if !*priorSuccess {
+			*priorSuccess = true
+			if isBroadcast {
+				allStarted.Done()
+			}
+		}
+		if debugConsume {
+			lib.tracer.Logf("[events] Debug: received one %s message in consumer group %s: %s", msg.Topic, consumerGroup, string(msg.Key))
+		}
 		shortCancel()
+		startedSideEffects.Do()
 		if isBroadcast {
-			started.Do()
 			func() {
 				lib.lastBroadcastLock.Lock()
 				defer lib.lastBroadcastLock.Unlock()
@@ -316,10 +348,6 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 			lib.tracer.Logf("[events] Debug: ack sequence number assigned for %s %s %s is %d: %d", msg.Topic, string(msg.Key), consumerGroup, msg.Partition, sequenceNumber)
 		}
 		sequenceNumbers[msg.Partition]++
-		cg := string(consumerGroup)
-		if isBroadcast {
-			cg = "broadcast"
-		}
 		ConsumeCounts.WithLabelValues(msg.Topic, cg).Inc()
 		outstandingWork.Add(1)
 		ConsumersWaitingForQueueConcurrencyDemand.WithLabelValues(cg).Add(1)

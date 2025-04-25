@@ -47,7 +47,9 @@ func BroadcastDeliveryTest[
 	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TBDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	conn.AugmentWithProducer(lib1)
 
-	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t))
+	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t) + "Topic")
+	lib1.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
+	lib2.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
 
 	var lock sync.Mutex
 	handlerCalled := make(map[string]bool)
@@ -99,7 +101,7 @@ func BroadcastDeliveryTest[
 	WaitFor(ctx, t, "consumer1", started1, StartupTimeout)
 	WaitFor(ctx, t, "consumer2", started2, StartupTimeout)
 
-	t.Log("Verify broadcast consumer groups are different")
+	t.Log("Verify broadcast consumer groups are different: %s vs %s", lib1.GetBroadcastConsumerGroupName(), lib2.GetBroadcastConsumerGroupName())
 	require.NotEqual(t, lib1.GetBroadcastConsumerGroupName(), lib2.GetBroadcastConsumerGroupName(), "broadcast consumer group names")
 
 	// Clean up when done
@@ -202,7 +204,9 @@ func IdempotentDeliveryTest[
 	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TIDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	conn.AugmentWithProducer(lib1)
 
-	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t))
+	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t) + "Topic")
+	lib1.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
+	lib2.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
 
 	var lock sync.Mutex
 	handlerCalled := make(map[string]bool)
@@ -364,7 +368,9 @@ func ExactlyOnceDeliveryTest[
 	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TEOD-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	conn.AugmentWithProducer(lib1)
 
-	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t))
+	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t) + "Topic")
+	lib1.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
+	lib2.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
 
 	var lock sync.Mutex
 	handlerCalled := make(map[string]bool)
@@ -511,7 +517,8 @@ func CloudEventEncodingTest[
 	type myEvent map[string]string
 	received := make(map[string][]eventmodels.Event[myEvent])
 
-	topic := eventmodels.BindTopic[myEvent](Name(t))
+	topic := eventmodels.BindTopic[myEvent](Name(t) + "Topic")
+	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
 
 	lib.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentA"), eventmodels.OnFailureBlock, Name(t), topic.Handler(
 		func(ctx context.Context, e eventmodels.Event[myEvent]) error {
@@ -569,8 +576,8 @@ func CloudEventEncodingTest[
 	}
 	encMsg2, err := json.Marshal(map[string]string{
 		"specversion":     "1.0",
-		"type":            Name(t),
-		"source":          Name(t),
+		"type":            Name(t) + "Topic",
+		"source":          Name(t) + "Topic",
 		"id":              id2,
 		"datacontenttype": "application/json",
 		"time":            now.UTC().Format(time.RFC3339),
@@ -677,14 +684,14 @@ func CloudEventEncodingTest[
 
 	for i, id := range ids {
 		for _, meta := range received[id] {
-			assert.Equalf(t, Name(t), meta.Topic, "topic msg%d %s", i+1, id)
+			assert.Equalf(t, Name(t)+"Topic", meta.Topic, "topic msg%d %s", i+1, id)
 			assert.Equalf(t, id, meta.Key, "key msg%d %s", i+1, id)
 			assert.Equalf(t, id, meta.ID, "id msg%d %s", i+1, id)
 			assert.Equalf(t, body, meta.Payload, "payload msg%d %s", i+1, id)
 			assert.Equalf(t, now.UTC().Format(time.RFC3339), meta.Timestamp.UTC().Format(time.RFC3339), "timstamp msg%d %s", i+1, id)
 			assert.Contains(t, meta.ContentType, "application/json", meta.ContentType, "contentType msg%d %s", i+1, id)
 			assert.Equalf(t, id, meta.Subject, "subject msg%d %s", i+1, id)
-			assert.Equalf(t, Name(t), meta.Type, "type msg%d %s", i+1, id)
+			assert.Equalf(t, Name(t)+"Topic", meta.Type, "type msg%d %s", i+1, id)
 			assert.Equalf(t, "1.0", meta.SpecVersion, "specVersion msg%d %s", i+1, id)
 			assert.Equalf(t, Name(t)+"-idempotentA", meta.ConsumerGroup, "consumerGroup msg%d %s", i+1, id)
 			assert.Equalf(t, Name(t), meta.HandlerName, "handlerName msg%d %s", i+1, id)

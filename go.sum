@@ -80,8 +80,8 @@ github.com/segmentio/kafka-go v0.4.47 h1:IqziR4pA3vrZq7YdRxaT3w1/5fvIH5qpCwstUan
 github.com/segmentio/kafka-go v0.4.47/go.mod h1:HjF6XbOKh0Pjlkr5GVZxt6CsjjwnmhVOfURM5KMd8qg=
 github.com/sharnoff/eventdistributor v0.1.1 h1:7OOcn2f9w5zGCjHm8KcIYKyp6y+W7xTNvo7rgnhWvvg=
 github.com/sharnoff/eventdistributor v0.1.1/go.mod h1:OEKtalwdvbR4ZSEkNzMUTcu5aSaW+jRHjmamBlyTcqk=
-github.com/singlestore-labs/generic v0.2.0 h1:IOx9/lHiiXEbEO84m62NsEuc6DBuEZS2xKnd1MBlums=
-github.com/singlestore-labs/generic v0.2.0/go.mod h1:EYP3HOfc9BcytHJMwwQsc99fR6EXxCd13B1egFCF3BQ=
+github.com/singlestore-labs/generic v0.3.0 h1:B6BoVcljHfwfzQ/ZcFdSaTTI8eUe+b9ENzcNVcqs0i8=
+github.com/singlestore-labs/generic v0.3.0/go.mod h1:EYP3HOfc9BcytHJMwwQsc99fR6EXxCd13B1egFCF3BQ=
 github.com/singlestore-labs/once v0.0.1 h1:GGfXqAm1+Aywxo2fSNBgMWN+8H/M/VpbbPgVN8Berto=
 github.com/singlestore-labs/once v0.0.1/go.mod h1:2f063S0jPlp6Qll5WdwwXIJ6I3OJYdTZtlUQ5zBvrJQ=
 github.com/singlestore-labs/simultaneous v0.0.1 h1:bg+zTtvXRqo2FoI3XK+dhbO7wwtiEJdVuJZ6rsaJYoM=
