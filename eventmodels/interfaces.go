@@ -52,11 +52,12 @@ type Producer[ID AbstractID[ID], TX AbstractTX] interface {
 	Produce(context.Context, ProduceMethod, ...ProducingEvent) error
 	// ProduceFromTable should be called by transaction wappers. It will
 	// send ids to a central thread that will in turn call ProduceSpecificTxEvents.
-	ProduceFromTable(ctx context.Context, eventIDs []ID) error
+	ProduceFromTable(ctx context.Context, eventIDs map[string][]ID) error
 	RecordError(string, error) error       // pauses to avoid spamming
 	RecordErrorNoWait(string, error) error // does not pause
 	IsConfigured() bool
 	Tracer() Tracer
+	ValidateTopics(context.Context, []string) error
 }
 
 type Tracer interface {

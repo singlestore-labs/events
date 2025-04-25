@@ -34,10 +34,10 @@ const (
 	broadcastParallelConsumption  = 3
 	errorSleep                    = time.Second
 	broadcastConsumerGroup        = "broadcastsGroup"
-	baseBroadcastHeartbeat        = time.Second * 10
+	baseBroadcastHeartbeat        = time.Second * 20
 	broadcastHeartbeatRandom      = 0.25
 	nonBroadcastReaderIdleTimeout = 5 * time.Minute
-	broadcastReaderIdleTimeout    = baseBroadcastHeartbeat * 2 // This cannot be < 1s: Kafka takes a while to deliver events after reader startup or generation change
+	broadcastReaderIdleTimeout    = baseBroadcastHeartbeat * 3 // This cannot be < 1s: Kafka takes a while to deliver events after reader startup or generation change
 	maxConsumerGroupNameLength    = 35
 	dialTimeout                   = time.Minute * 2
 	deleteTimeout                 = time.Minute * 2
@@ -90,6 +90,8 @@ type LibraryNoDB struct {
 	ready                     atomic.Int32
 	topicConfig               map[string]kafka.TopicConfig
 	topicsSeen                gwrap.SyncMap[string, *creatingTopic] // messages with topic can be sent when channel is closed
+	topicListingStarted       sync.Once
+	topicsHaveBeenListed      chan struct{}
 	mustRegisterTopics        bool
 	hasTxConsumers            bool
 	clientID                  string
@@ -217,6 +219,7 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 			broadcastConsumerMaxLock:  200,
 			doEnhance:                 true,
 			instanceID:                instanceCount.Add(1),
+			topicsHaveBeenListed:      make(chan struct{}),
 		},
 	}
 }
@@ -305,6 +308,9 @@ func (lib *Library[ID, TX, DB]) start(str string, args ...any) error {
 		Dialer:  lib.dialer(),
 	})
 	lib.ready.Store(isRunning)
+	if len(lib.brokers) == 0 {
+		return errors.Errorf("no brokers configured")
+	}
 	return nil
 }
 
@@ -534,34 +540,43 @@ func (lib *Library[ID, TX, DB]) Tracer() eventmodels.Tracer         { return lib
 // controller is needed for certain requests, like creating a topic
 func (lib *LibraryNoDB) getController(ctx context.Context) (_ *kafka.Client, err error) {
 	dialer := lib.dialer()
-	conn, err := dialer.DialContext(ctx, "tcp", lib.brokers[0])
-	if err != nil {
-		return nil, errors.Errorf("event library dial first kafka broker (%s): %w", lib.brokers[0], err)
-	}
-	defer func() {
-		e := conn.Close()
-		if err == nil && e != nil {
-			err = errors.Errorf("event library close dialer (%s): %w", lib.brokers[0], err)
+	for i, broker := range lib.brokers {
+		conn, err := dialer.DialContext(ctx, "tcp", broker)
+		if err != nil {
+			lib.tracer.Logf("[events] could not connect to broker %d (of %d) %s: %v", i+1, len(lib.brokers), broker, err)
+			if i == len(lib.brokers)-1 {
+				// last broker, give up
+				return nil, errors.Errorf("event library dial kafka broker (%s): %w", broker, err)
+			}
+			continue
 		}
-	}()
-	controller, err := conn.Controller()
-	if err != nil {
-		return nil, errors.Errorf("event library get controller from kafka connection: %w", err)
+		defer func() {
+			e := conn.Close()
+			if err == nil && e != nil {
+				err = errors.Errorf("event library close dialer (%s): %w", lib.brokers[0], err)
+			}
+		}()
+		controller, err := conn.Controller()
+		if err != nil {
+			return nil, errors.Errorf("event library get controller from kafka connection: %w", err)
+		}
+		ips, err := net.LookupIP(controller.Host)
+		if err != nil {
+			return nil, errors.Errorf("event library lookup IP of controller (%s): %w", controller.Host, err)
+		}
+		if len(ips) == 0 {
+			return nil, errors.Errorf("event library lookup IP of controller (%s) got no addresses", controller.Host)
+		}
+		return &kafka.Client{
+			Addr: &net.TCPAddr{
+				IP:   ips[0],
+				Port: controller.Port,
+			},
+			Transport: lib.transport(),
+		}, nil
 	}
-	ips, err := net.LookupIP(controller.Host)
-	if err != nil {
-		return nil, errors.Errorf("event library lookup IP of controller (%s): %w", controller.Host, err)
-	}
-	if len(ips) == 0 {
-		return nil, errors.Errorf("event library lookup IP of controller (%s) got no addresses", controller.Host)
-	}
-	return &kafka.Client{
-		Addr: &net.TCPAddr{
-			IP:   ips[0],
-			Port: controller.Port,
-		},
-		Transport: lib.transport(),
-	}, nil
+	// should not be able to get here
+	return nil, errors.Errorf("unexpected condition")
 }
 
 // getConsumerGroupCoordinator returns a client talking to the control group's

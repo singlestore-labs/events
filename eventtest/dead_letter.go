@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/memsql/ntest"
+	"github.com/segmentio/kafka-go"
 	"github.com/singlestore-labs/events"
 	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/stretchr/testify/require"
@@ -96,7 +97,7 @@ func DeadLetterTest[
 	}
 	var deliveryInfo deliveryInfoBlock
 
-	consumerGroup := events.NewConsumerGroup(Name(t))
+	consumerGroup := events.NewConsumerGroup(Name(t) + "CG")
 
 	var lock sync.Mutex
 	firstSignal := make(chan struct{})
@@ -106,8 +107,9 @@ func DeadLetterTest[
 
 	lib := events.New[ID, TX, DB]()
 	conn.AugmentWithProducer(lib)
-	topic := eventmodels.BindTopic[myType](Name(t))
-	deadLetterTopic := eventmodels.BindTopic[myType](events.DeadLetterTopic(Name(t), consumerGroup))
+	topic := eventmodels.BindTopic[myType](Name(t) + "Topic")
+	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
+	deadLetterTopic := eventmodels.BindTopic[myType](events.DeadLetterTopic(Name(t)+"Topic", consumerGroup))
 	id1 := uuid.New().String()
 	configuredTimeout := 500 * time.Millisecond
 	mkHandler := func(name string) func(context.Context, eventmodels.Event[myType]) error {
@@ -135,7 +137,7 @@ func DeadLetterTest[
 		return deliveryInfo
 	}
 
-	lib.ConsumeIdempotent(consumerGroup, onFailure, Name(t), topic.Handler(mkHandler("first")), events.WithTimeout(configuredTimeout))
+	lib.ConsumeIdempotent(consumerGroup, onFailure, Name(t)+"CIH", topic.Handler(mkHandler("first")), events.WithTimeout(configuredTimeout))
 
 	firstCtx, cancelFirst := context.WithCancel(ctx)
 	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, prefix+"1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
@@ -168,7 +170,7 @@ func DeadLetterTest[
 	if onFailure == eventmodels.OnFailureSave {
 		lib2.ConsumeIdempotent(consumerGroup, eventmodels.OnFailureBlock, "deadLetterDirect", deadLetterTopic.Handler(mkHandler("deadLetterDirect")), events.WithTimeout(configuredTimeout))
 	} else {
-		lib2.ConsumeIdempotent(consumerGroup, onFailure, Name(t), topic.Handler(mkHandler("second")), events.WithTimeout(configuredTimeout))
+		lib2.ConsumeIdempotent(consumerGroup, onFailure, Name(t)+"CIH", topic.Handler(mkHandler("second")), events.WithTimeout(configuredTimeout))
 	}
 	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, prefix+"2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	// this assignment is thread-safe because lib1 is completely shut down and lib2 hasn't started yet

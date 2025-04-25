@@ -157,27 +157,47 @@ func (lib *Library[ID, TX, DB]) sendBroadcastHeartbeat(ctx context.Context, allD
 		allDone.Done()
 	}()
 	b := backoffPolicy.Start(ctx)
+	var lastSend time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
+		// gap is the minimum of how long since we've either received or sent a broadcast.
+		// We use it to avoid sending a heartbeat if we've either received or sent
+		// a heartbeat recently.
 		gap, _ := lib.BroadcastConsumerLastLatency()
-		if wantHB := lib.pickHeartbeat(); gap < wantHB {
+		sinceLastSend := time.Since(lastSend) // on the first iteration, this is huge
+		if sinceLastSend < gap {
+			gap = sinceLastSend
+		}
+		// wantHB is a somewhat random interval after which we send a heartbeat.
+		// It's somewhat random because if it wasn't then different servers could all
+		// send at the same time if they all received something at the same time.
+		wantHB := lib.pickHeartbeat()
+		if gap < wantHB {
+			// too soon to send, sleep for a bit
 			timer.Reset(wantHB)
 			select {
 			case <-ctx.Done():
 				return
 			case <-timer.C:
 			}
-			continue // if nothing has been received in the meantime, the gap will now be larger
+			// if nothing has been received in the meantime, the gap will now be larger and
+			// for the same wantHB would fall through and send a heartbeat. The wantHB might
+			// be longer or shorter. If longer, we'll wait some more. If shorter, we'll send
+			// right away.
+			continue
 		}
-		lib.tracer.Logf("[events] sending broadcast heartbeat to %s", heartbeatTopic.Topic())
+		lib.tracer.Logf("[events] sending broadcast heartbeat to %s (%s, %s)", heartbeatTopic.Topic(), gap, wantHB)
 		err := lib.Produce(ctx, eventmodels.ProduceImmediate, heartbeatTopic.Event(uuid.New().String(), HeartbeatEvent{}))
 		if err == nil {
 			b = backoffPolicy.Start(ctx)
+			lastSend = time.Now()
 		} else if !backoff.Continue(b) {
+			// We use backoff so that if sending fails we don't keep retrying in a tight loop
+			// Continue will only be false if the context has expired
 			return
 		}
 	}

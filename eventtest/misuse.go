@@ -33,15 +33,12 @@ func ErrorWhenMisusedTest[
 	lib := events.New[ID, TX, DB]()
 	lib.SetEnhanceDB(true)
 	lib.Configure(conn, t, true, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	produceDone, err := lib.CatchUpProduce(ctx, time.Second*10, 20)
-	require.NoError(t, err)
 
 	goodTopic := eventmodels.BindTopic[myEvent](Name(t) + "-good")
 	badTopic := eventmodels.BindTopic[myEvent](Name(t) + "-bad")
 
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: goodTopic.Topic()})
 
-	t.Log("The bad topics are not a blocker for the transaction because they're asyncronously")
 	startTime := time.Now()
 	require.NoError(t, conn.Transact(ctx, func(tx TX) error {
 		return nil
@@ -50,9 +47,9 @@ func ErrorWhenMisusedTest[
 	t.Log("time for an empty transaction: %s", duration)
 	require.Lessf(t, duration, time.Second, "empty tx should be fast, not %s", duration)
 
-	t.Log("The bad topics are not a blocker for the transaction because they're produced asynchronously")
+	t.Log("The bad topics should be rejected before the catch-up-producer is started")
 	startTime = time.Now()
-	require.NoError(t, conn.Transact(ctx, func(tx TX) error {
+	require.Error(t, conn.Transact(ctx, func(tx TX) error {
 		tx.Produce(badTopic.Event("irrelevant", myEvent{"foo": "bar"}).
 			ID("doesn't matter"),
 		)
@@ -60,7 +57,23 @@ func ErrorWhenMisusedTest[
 		return nil
 	}), "transact/send with bad topic")
 	duration = time.Since(startTime)
-	t.Log("time for an transaction with event: %s", duration)
+	t.Log("time for an transaction with event w/o backup producer: %s", duration)
+
+	produceDone, err := lib.CatchUpProduce(ctx, time.Second*10, 20)
+	require.NoError(t, err)
+	t.Log("catch up producer started...")
+
+	t.Log("The bad topics should be rejected after the catch-up-producer is started")
+	startTime = time.Now()
+	require.Error(t, conn.Transact(ctx, func(tx TX) error {
+		tx.Produce(badTopic.Event("irrelevant", myEvent{"foo": "bar"}).
+			ID("doesn't matter"),
+		)
+		t.Logf("added events to transaction")
+		return nil
+	}), "transact/send with bad topic")
+	duration = time.Since(startTime)
+	t.Log("time for an transaction with event with backup producer: %s", duration)
 	require.Lessf(t, duration, time.Second, "tx should be fast, not %s", duration)
 
 	t.Log("immediate produce will check the topic and should error")

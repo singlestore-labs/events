@@ -130,7 +130,7 @@ func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
 }
 
-func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tracer eventmodels.Tracer, tx TX, events ...eventmodels.ProducingEvent) ([]eventmodels.BinaryEventID, error) {
+func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tracer eventmodels.Tracer, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
 	return SaveEventsInsideTx[TX](ctx, tracer, tx, events...)
 }
 
@@ -363,16 +363,20 @@ func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, t
 
 // SaveEventsInsideTx is meant to be used inside a transaction to persist
 // events as part of that transaction.
-func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer eventmodels.Tracer, tx TX, events ...eventmodels.ProducingEvent) ([]eventmodels.BinaryEventID, error) {
+func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer eventmodels.Tracer, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
-	ids := make([]eventmodels.BinaryEventID, len(events))
+	ids := eventdb.PreAllocateIDMap[eventmodels.BinaryEventID](events...)
+
 	ib := sq.Insert("eventsOutgoing").
 		Columns("id", "sequenceNumber", "topic", "ts", "`key`", "data", "headers").
 		PlaceholderFormat(sq.Question)
+
 	for i, event := range events {
-		ids[i] = eventmodels.BinaryEventID{}.New()
+		topic := event.GetTopic()
+		id := eventmodels.BinaryEventID{}.New()
+		ids[topic] = append(ids[topic], id)
 		headers := event.GetHeaders()
 		enc, err := json.Marshal(event)
 		if err != nil {
@@ -382,8 +386,7 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer e
 		if err != nil {
 			return nil, errors.Errorf("could not encode event headers to produce in topic (%s): %w", event.GetTopic(), err)
 		}
-		// ib = ib.Values(ids[i], i+1, event.GetTopic(), event.GetTimestamp().UTC(), event.GetKey(), enc, headersEnc)
-		ib = ib.Values(ids[i], i+1, event.GetTopic(), event.GetTimestamp().UTC().Format("2006-01-02 15:04:05.000000"), event.GetKey(), enc, headersEnc)
+		ib = ib.Values(id, i+1, event.GetTopic(), event.GetTimestamp().UTC().Format("2006-01-02 15:04:05.000000"), event.GetKey(), enc, headersEnc)
 	}
 	if tracer != nil {
 		tracer.Logf("[events] saving %d events as part of a transaction, example topic: '%s'", len(events), events[0].GetTopic())

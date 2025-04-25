@@ -76,7 +76,7 @@ func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
 }
 
-func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tracer eventmodels.Tracer, tx TX, events ...eventmodels.ProducingEvent) ([]eventmodels.StringEventID, error) {
+func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tracer eventmodels.Tracer, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.StringEventID, error) {
 	return SaveEventsInsideTx[TX](ctx, tracer, tx, events...)
 }
 
@@ -281,27 +281,29 @@ func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, t
 
 // SaveEventsInsideTx is meant to be used inside a transaction to persist
 // events as part of that transaction.
-func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer eventmodels.Tracer, tx TX, events ...eventmodels.ProducingEvent) ([]eventmodels.StringEventID, error) {
+func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer eventmodels.Tracer, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.StringEventID, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
-	ids := make([]eventmodels.StringEventID, len(events))
+	ids := eventdb.PreAllocateIDMap[eventmodels.StringEventID](events...)
 	ib := sq.Insert("eventsOutgoing").
 		Columns("id", "sequenceNumber", "topic", "ts", "key", "data", "headers").
 		PlaceholderFormat(sq.Dollar)
 	var emptyID eventmodels.StringEventID
 	for i, event := range events {
-		ids[i] = emptyID.New()
+		id := emptyID.New()
+		topic := event.GetTopic()
+		ids[topic] = append(ids[topic], id)
 		headers := event.GetHeaders()
 		enc, err := json.Marshal(event)
 		if err != nil {
-			return nil, errors.Errorf("could not encode event to produce in topic (%s): %w", event.GetTopic(), err)
+			return nil, errors.Errorf("could not encode event to produce in topic (%s): %w", topic, err)
 		}
 		headersEnc, err := json.Marshal(headers)
 		if err != nil {
-			return nil, errors.Errorf("could not encode event headers to produce in topic (%s): %w", event.GetTopic(), err)
+			return nil, errors.Errorf("could not encode event headers to produce in topic (%s): %w", topic, err)
 		}
-		ib = ib.Values(ids[i], i+1, event.GetTopic(), event.GetTimestamp().UTC(), event.GetKey(), enc, headersEnc)
+		ib = ib.Values(id, i+1, topic, event.GetTimestamp().UTC(), event.GetKey(), enc, headersEnc)
 	}
 	if tracer != nil {
 		tracer.Logf("[events] saving %d events as part of a transaction, example topic: '%s'", len(events), events[0].GetTopic())

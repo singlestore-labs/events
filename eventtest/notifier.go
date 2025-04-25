@@ -18,22 +18,74 @@ import (
 
 type myNotifierEvent map[string]string
 
-var notifierTopic = eventmodels.BindTopic[myNotifierEvent]("TestEventNotifier")
+var unfilteredNotifierTopic = eventmodels.BindTopic[myNotifierEvent]("TestEventUnfilteredNotifier")
+
+var unfiltered3 = events.RegisterUnfiltered("TestEventUnfilteredNotifier-registration", unfilteredNotifierTopic, events.Async(10))
+
+func EventUnfilteredNotifierTest[
+	ID eventmodels.AbstractID[ID],
+	TX eventmodels.EnhancedTX,
+	DB AugmentAbstractDB[ID, TX],
+](
+	ctx context.Context,
+	t ntest.T,
+	conn DB,
+	brokers Brokers,
+	cancel Cancel,
+) {
+	origT := t
+	t = ntest.ExtraDetailLogger(origT, "UNT")
+	lib := events.New[ID, TX, DB]()
+	lib.SetEnhanceDB(true)
+	conn.AugmentWithProducer(lib)
+	lib.Configure(conn, ntest.ExtraDetailLogger(origT, "UNT-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+
+	consumeDone := lib.StartConsumingOrPanic(ctx)
+
+	allChan := unfiltered3.Subscribe(lib)
+
+	id := uuid.New().String()
+	require.NoError(t, lib.Produce(ctx, eventmodels.ProduceImmediate, unfilteredNotifierTopic.Event("key-"+id,
+		myNotifierEvent{"foo": "bar"}).ID(id)))
+
+	timer := time.NewTimer(time.Minute * 3)
+Wait:
+	for {
+		select {
+		case <-allChan.WaitChan():
+			event := allChan.Consume()
+			if event.ID == id {
+				t.Log("received the event we were looking for")
+				timer.Stop()
+				break Wait
+			}
+			t.Logf("received an event with a different id, ignoring %s", event.ID)
+		case <-timer.C:
+			t.Log("timed out, giving up")
+		}
+	}
+	t.Log("waiting for shutdown")
+	allChan.Unsubscribe()
+	cancel()
+	<-consumeDone
+}
+
+var notifierTopic = eventmodels.BindTopic[myNotifierEvent]("TestEventComprehensiveNotifier")
 
 // The order of filtered & unfiltered matters here because broadcast events
 // are delivered synchronously and the inner unfiltered receivers wait for the
 // filtered receiver to have triggered before they consume. If unfiltered is
 // first, the test deadlocks.
 
-var filtered = events.RegisterFiltered("TestEventNotifier-filtered", notifierTopic, func(e eventmodels.Event[myNotifierEvent]) string {
+var filtered = events.RegisterFiltered("TestEventComprehensiveNotifier-filtered", notifierTopic, func(e eventmodels.Event[myNotifierEvent]) string {
 	return e.Payload["quarter"]
 })
 
-var unfiltered1 = events.RegisterUnfiltered("TestEventNotifier-unfiltered1", notifierTopic, events.Async(10))
+var unfiltered1 = events.RegisterUnfiltered("TestEventComprehensiveNotifier-unfiltered1", notifierTopic, events.Async(10))
 
-var unfiltered2 = events.RegisterUnfiltered("TestEventNotifier-unfiltered2", notifierTopic, events.Async(-1))
+var unfiltered2 = events.RegisterUnfiltered("TestEventComprehensiveNotifier-unfiltered2", notifierTopic, events.Async(-1))
 
-func EventNotifierTest[
+func EventComprehensiveNotifierTest[
 	ID eventmodels.AbstractID[ID],
 	TX eventmodels.EnhancedTX,
 	DB AugmentAbstractDB[ID, TX],
