@@ -81,7 +81,7 @@ var HandlerPanicCounts = mustRegister(prometheus.NewCounterVec(
 	[]string{"handler_name", "topic"},
 ))
 
-var HandlerCounts = mustRegister(prometheus.NewCounterVec(
+var HandlerSuccessCounts = mustRegister(prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: prefix + "handler_success",
 		Help: "Number handler success (by handler name and topic)",
