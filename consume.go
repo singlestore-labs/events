@@ -187,7 +187,7 @@ func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consume
 	for topic, topicHandlers := range group.topics {
 		ConsumeCounts.WithLabelValues(topic, cg).Add(0)
 		for handlerName, handler := range topicHandlers.handlers {
-			HandlerCounts.WithLabelValues(handlerName, topic).Add(0)
+			HandlerSuccessCounts.WithLabelValues(handlerName, topic).Add(0)
 			if handler.isDeadLetter {
 				DeadLetterConsumeCounts.WithLabelValues(handlerName, handler.baseTopic).Add(0)
 			} else {
@@ -622,7 +622,6 @@ func (lib *Library[ID, TX, DB]) callHandler(ctx context.Context, activeLimiter *
 			for i, idx := range outstanding {
 				pending[i] = msgs[idx]
 			}
-			HandlerCounts.WithLabelValues(handler.name, pending[0].Topic).Inc()
 			if handler.isDeadLetter {
 				DeadLetterConsumeCounts.WithLabelValues(handler.name, handler.baseTopic).Inc()
 			}
@@ -636,12 +635,13 @@ func (lib *Library[ID, TX, DB]) callHandler(ctx context.Context, activeLimiter *
 		stillOutstanding := make([]int, 0, len(outstanding))
 		for i, err := range errs {
 			idx := outstanding[i]
+			msg := msgs[idx]
 			if err == nil {
+				HandlerSuccessCounts.WithLabelValues(handler.name, msg.Topic).Inc()
 				successes[idx] = true
 				continue
 			}
 			handling := eventmodels.GetErrorHandling(err)
-			msg := msgs[idx]
 			_ = lib.RecordErrorNoWait("consumer handler failure", errors.Errorf("handler (%s) for topic (%s) for message (%s) in consumer group (%s) failed: %w",
 				handler.name, msg.Topic, string(msg.Key), handler.consumerGroup, err))
 			HandlerErrorCounts.WithLabelValues(handler.name, msg.Topic).Inc()
