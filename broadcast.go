@@ -157,6 +157,7 @@ func (lib *Library[ID, TX, DB]) sendBroadcastHeartbeat(ctx context.Context, allD
 		allDone.Done()
 	}()
 	b := backoffPolicy.Start(ctx)
+	var lastSend time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -164,7 +165,12 @@ func (lib *Library[ID, TX, DB]) sendBroadcastHeartbeat(ctx context.Context, allD
 		default:
 		}
 		gap, _ := lib.BroadcastConsumerLastLatency()
-		if wantHB := lib.pickHeartbeat(); gap < wantHB {
+		sinceLastSend := time.Since(lastSend)
+		if sinceLastSend < gap {
+			gap = sinceLastSend
+		}
+		wantHB := lib.pickHeartbeat()
+		if gap < wantHB {
 			timer.Reset(wantHB)
 			select {
 			case <-ctx.Done():
@@ -173,10 +179,11 @@ func (lib *Library[ID, TX, DB]) sendBroadcastHeartbeat(ctx context.Context, allD
 			}
 			continue // if nothing has been received in the meantime, the gap will now be larger
 		}
-		lib.tracer.Logf("[events] sending broadcast heartbeat to %s", heartbeatTopic.Topic())
+		lib.tracer.Logf("[events] sending broadcast heartbeat to %s (%s, %s)", heartbeatTopic.Topic(), gap, wantHB)
 		err := lib.Produce(ctx, eventmodels.ProduceImmediate, heartbeatTopic.Event(uuid.New().String(), HeartbeatEvent{}))
 		if err == nil {
 			b = backoffPolicy.Start(ctx)
+			lastSend = time.Now()
 		} else if !backoff.Continue(b) {
 			return
 		}
