@@ -53,7 +53,12 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(ctx context.Context, co
 	if len(preCreate) == 0 {
 		return
 	}
-	lib.precreateTopicsForConsuming(ctx, consumerGroup, preCreate)
+	// This shouldn't error because the precreate for the non-dead letter versions
+	// succeeded before this was called
+	err := lib.precreateTopicsForConsuming(ctx, consumerGroup, preCreate)
+	if err != nil {
+		lib.tracer.Logf("[events] UNEXPECTED ERROR creating topics for dead letter consumption: %+v", err)
+	}
 	var startConsumer bool
 	dlGroup := &group{
 		topics:  make(map[string]*topicHandlers),

@@ -83,9 +83,18 @@ func (lib *Library[ID, TX, DB]) StartConsuming(ctx context.Context) (started cha
 			lib.tracer.Logf("[events] Event handlers are no longer stuck")
 		},
 	)
-	doneChan := make(chan struct{})
-	startChan := make(chan struct{})
+	for consumerGroup, group := range lib.readers {
+		err := lib.precreateTopicsForConsuming(ctx, consumerGroup, generic.CombineSlices(generic.Keys(group.topics), generic.Keys(lib.broadcast.topics)))
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if debugConsumeStartup {
+		lib.tracer.Logf("[events] Debug: done pre-creating topics for consumption")
+	}
+	// allDone tracks closing down the many threads that are involved in consuming topics
 	var allDone sync.WaitGroup
+	// allStarted tracks getting the consumers ready
 	var allStarted sync.WaitGroup
 	if debugConsumeStartup {
 		lib.tracer.Logf("[events] Debug: consume startwait +%d for readers", len(lib.readers))
@@ -110,6 +119,8 @@ func (lib *Library[ID, TX, DB]) StartConsuming(ctx context.Context) (started cha
 	for consumerGroup, group := range lib.readers {
 		go lib.startConsumingGroup(ctx, consumerGroup, group, limiter, false, &allStarted, &allDone, false)
 	}
+	doneChan := make(chan struct{})
+	startChan := make(chan struct{})
 	go func() {
 		allDone.Wait()
 		if debugConsumeStartup {
@@ -152,7 +163,6 @@ func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consume
 			topicHandler.handlers[name] = handler
 		}
 	}
-	lib.precreateTopicsForConsuming(ctx, consumerGroup, generic.Keys(group.topics))
 	switch {
 	case isBroadcast:
 		allDone.Add(1)
