@@ -7,6 +7,7 @@ import (
 	"github.com/memsql/errors"
 
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/generic"
 )
 
 // BasicTX is what's needed from a transaction in WrapTransaction
@@ -33,7 +34,7 @@ type ComboDB[ID eventmodels.AbstractID[ID], TX BasicTX] interface {
 	eventmodels.AbstractDB[ID, TX]
 }
 
-type SaveEventsFunc[ID eventmodels.AbstractID[ID], TX BasicTX] func(context.Context, eventmodels.Tracer, TX, ...eventmodels.ProducingEvent) ([]ID, error)
+type SaveEventsFunc[ID eventmodels.AbstractID[ID], TX BasicTX] func(context.Context, eventmodels.Tracer, TX, ...eventmodels.ProducingEvent) (map[string][]ID, error)
 
 // Transact implements a Transact method as needed by AbstractDB (in ComboDB).
 // It does not call itself recursively and insteads depends upon BeginTx
@@ -52,7 +53,7 @@ func Transact[ID eventmodels.AbstractID[ID], TX BasicTX, DB ComboDB[ID, TX]](
 		if producer != nil {
 			err = producer.ProduceFromTable(ctx, ids)
 		} else {
-			_, err = db.ProduceSpecificTxEvents(ctx, ids)
+			_, err = db.ProduceSpecificTxEvents(ctx, generic.CombineSlices(generic.Values(ids)...))
 		}
 	}
 	return err
@@ -65,8 +66,8 @@ func WrapTransaction[ID eventmodels.AbstractID[ID], TX BasicTX, DB BasicDB[TX]](
 	ctx context.Context, db DB, tracer eventmodels.Tracer,
 	f func(TX) error,
 	saveEvents SaveEventsFunc[ID, TX],
-) ([]ID, error) {
-	var ids []ID
+) (map[string][]ID, error) {
+	var ids map[string][]ID
 	err := func() (err error) {
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {

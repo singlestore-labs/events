@@ -19,11 +19,22 @@ var debugProduce = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
 
 // Produce sends events directly to Kafka. It is not transactional. Use tx.Produce to produce
 // from within a transaction.
-func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.ProduceMethod, events ...eventmodels.ProducingEvent) error {
+func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.ProduceMethod, events ...eventmodels.ProducingEvent) (err error) {
 	if len(events) == 0 {
 		return nil
 	}
-	err := lib.start("produce events (%d)", len(events))
+	if debugProduce {
+		defer func() {
+			for _, event := range events {
+				if err != nil {
+					lib.tracer.Logf("[events] failed produce %s / %s: %s", event.GetTopic(), event.GetKey(), err)
+				} else {
+					lib.tracer.Logf("[events] produced %s / %s", event.GetTopic(), event.GetKey())
+				}
+			}
+		}()
+	}
+	err = lib.start("produce events (%d)", len(events))
 	if err != nil {
 		return lib.RecordError("produceNotReady", err)
 	}
@@ -39,9 +50,6 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 		messages[i].Topic = topic
 		ProduceTopicCounts.WithLabelValues(topic, string(method)).Inc()
 		messages[i].Key = []byte(event.GetKey())
-		if debugProduce {
-			lib.tracer.Logf("[events] produce %s / %s", messages[i].Topic, string(messages[i].Key))
-		}
 		ts := event.GetTimestamp()
 		if !ts.IsZero() {
 			messages[i].Time = ts
@@ -87,9 +95,30 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 // transaction. If a CatchUpProducer is running, the events will be forwarded
 // to that thread. If not, they'll be sent to Kafka synchronously. Sending to
 // Kafka synchronously is slow.
-func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventIDs []ID) error {
-	if len(eventIDs) == 0 {
+//
+// ProduceFromTable can only be used after Configure.
+func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventsByTopic map[string][]ID) error {
+	err := lib.start("produce events from table")
+	if err != nil {
+		return lib.RecordError("produceNotReady", err)
+	}
+	if len(eventsByTopic) == 0 {
 		return nil
+	}
+	var eventCount int
+	for _, events := range eventsByTopic {
+		eventCount += len(events)
+	}
+	if eventCount == 0 {
+		return nil
+	}
+	eventIDs := make([]ID, 0, eventCount)
+	for _, events := range eventsByTopic {
+		eventIDs = append(eventIDs, events...)
+	}
+	err = lib.ValidateTopics(ctx, generic.Keys(eventsByTopic))
+	if err != nil {
+		return err
 	}
 	if lib.producerRunning.Load() != 0 {
 		select {
@@ -117,7 +146,7 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventIDs [
 	}
 	ProduceFromTxSplit.WithLabelValues("sync").Inc()
 	_ = lib.ProduceSyncCount.Add(uint64(len(eventIDs)))
-	_, err := lib.db.ProduceSpecificTxEvents(ctx, eventIDs)
+	_, err = lib.db.ProduceSpecificTxEvents(ctx, eventIDs)
 	return err
 }
 
@@ -125,9 +154,11 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventIDs [
 // database during a transaction but were not sent to Kafka
 //
 // The returned channel is closed when CatchUpProduce shuts down (due to context cancel)
+//
+// CatchUpProduce can only be used after Configure.
 func (lib *Library[ID, TX, DB]) CatchUpProduce(ctx context.Context, sleepTime time.Duration, batchSize int) (chan struct{}, error) {
 	done := make(chan struct{})
-	err := lib.start("produce Kafka messages")
+	err := lib.start("catch up produce")
 	if err != nil {
 		close(done)
 		return done, err

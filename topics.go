@@ -63,6 +63,10 @@ const (
 	topicCreationDeadline    = time.Second * 30
 )
 
+// UnregisteredTopicError is the base error when attempting to create a
+// topic that isn't pre-preregistered when pre-registration is required.
+const UnregisteredTopicError errors.String = "topic is not pre-registered"
+
 // SetTopicConfig can be used to override the configuration parameters
 // for new topics. If no override has been set, then the default configuration
 // for new topics is simply: 2 partitions. High volume topics should use 10
@@ -97,9 +101,45 @@ func (lib *LibraryNoDB) createTopicsForOutgoingEvents(ctx context.Context, event
 	return lib.CreateTopics(ctx, fmt.Sprintf("produce %d (eg %s %s)", len(events), events[0].GetTopic(), events[0].GetKey()), generic.Keys(topicSet))
 }
 
+// ValidateTopics will be fast whenever it can be fast. Sometimes it will
+// wait for topics to be listed. ValidateTopics topics can only be used after Configure.
+func (lib *Library[ID, TX, DB]) ValidateTopics(ctx context.Context, topics []string) error {
+	err := lib.start("validate topics")
+	if err != nil {
+		return err
+	}
+	if !lib.mustRegisterTopics {
+		return nil
+	}
+Topics:
+	for _, topic := range topics {
+		if _, ok := lib.getTopicConfig(topic); ok {
+			continue
+		}
+		if topic == heartbeatTopic.Topic() {
+			continue
+		}
+		if err := lib.waitForTopicsListing(ctx); err != nil {
+			return err
+		}
+		seen, ok := lib.topicsSeen.Load(topic)
+		if !ok {
+			return errors.Errorf("topic (%s) is invalid", topic)
+		}
+		select {
+		case <-seen.created:
+			continue Topics
+		default:
+		}
+		return errors.Errorf("topic (%s) is invalid, or at least not created yet", topic)
+	}
+	// not reachable
+	return nil
+}
+
 // precreateTopicsForConsuming makes sure that the topics to be consumed exist.
 // It blocks until they do.
-func (lib *LibraryNoDB) precreateTopicsForConsuming(ctx context.Context, consumerGroup consumerGroupName, topics []string) {
+func (lib *LibraryNoDB) precreateTopicsForConsuming(ctx context.Context, consumerGroup consumerGroupName, topics []string) error {
 	var priorError bool
 	b := backoffPolicy.Start(ctx)
 	for {
@@ -108,13 +148,70 @@ func (lib *LibraryNoDB) precreateTopicsForConsuming(ctx context.Context, consume
 			if priorError {
 				lib.tracer.Logf("[events] prior error creating topics %v, preventing starting of consumer group %s, has cleared up", topics, consumerGroup)
 			}
-			return
+			return nil
 		}
 		priorError = true
 		_ = errors.Alertf("could not create topics needed to consume group (%s): %w", consumerGroup, err)
+		if errors.Is(err, UnregisteredTopicError) {
+			return err
+		}
 		if !backoff.Continue(b) {
+			return err
+		}
+	}
+}
+
+func (lib *LibraryNoDB) listAvailableTopics() {
+	defer close(lib.topicsHaveBeenListed)
+	dialer := lib.dialer()
+	for {
+		lib.tracer.Logf("[events] starting over on listing topics")
+		for _, broker := range lib.brokers {
+			lib.tracer.Logf("[events] connecting to %s to list topics", broker)
+			conn, err := dialer.Dial("tcp", broker)
+			if err != nil {
+				lib.tracer.Logf("[events] could not connect to broker %s, was going to list topics: %v", broker, err)
+				continue
+			}
+			defer func() {
+				_ = conn.Close()
+			}()
+			partitions, err := conn.ReadPartitions()
+			if err != nil {
+				lib.tracer.Logf("[events] could not list partitions on broker %s: %v", broker, err)
+				continue
+			}
+			lib.tracer.Logf("[events] listing existing topics...")
+			seen := make(map[string]bool)
+			for _, p := range partitions {
+				if seen[p.Topic] {
+					continue
+				}
+				seen[p.Topic] = true
+				lib.tracer.Logf("[events] topic %s found in partition", p.Topic)
+				ct := creatingTopic{
+					created: make(chan struct{}),
+				}
+				ct.state.Store(1)
+				close(ct.created)
+				_, _ = lib.topicsSeen.LoadOrStore(p.Topic, &ct)
+			}
+			lib.tracer.Logf("[events] done listing existing topics")
 			return
 		}
+		lib.tracer.Logf("[events] waiting before making another attempt to list topics")
+	}
+}
+
+func (lib *LibraryNoDB) waitForTopicsListing(ctx context.Context) error {
+	lib.topicListingStarted.Do(func() {
+		lib.listAvailableTopics()
+	})
+	select {
+	case <-lib.topicsHaveBeenListed:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -135,6 +232,10 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, topics []s
 			return err
 		}
 	}
+	if err := lib.waitForTopicsListing(ctx); err != nil {
+		return err
+	}
+	var firstWorkFound bool // no point in logging much until we know there is work to do
 	var ctr kafka.CreateTopicsRequest
 	var outstanding map[string]*creatingTopic
 	var topicRequest []string
@@ -151,6 +252,10 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, topics []s
 		state := seen.state.Load()
 		if state == topicCreated {
 			continue
+		}
+		if !firstWorkFound {
+			lib.tracer.Logf("done waiting for topic listing to complete")
+			firstWorkFound = true
 		}
 		doCreate := !ok
 		if state == topicCreateFailed {
@@ -172,9 +277,19 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, topics []s
 		// In either case, state will already be topicCreating.
 		if doCreate {
 			tc, ok := lib.getTopicConfig(topic)
-			if lib.mustRegisterTopics && !ok {
+			if lib.mustRegisterTopics && !ok && topic != heartbeatTopic.Topic() {
 				lib.tracer.Logf("[events] %s: requested topic, %s, not pre-registered", why, topic)
-				overrideFinalError = errors.Errorf("event library attempt to create topic (%s) that was not pre-registered (%s)", topic, why)
+				overrideFinalError = UnregisteredTopicError.Errorf("event library attempt to create topic (%s) that was not pre-registered (%s)", topic, why)
+				now := time.Now()
+				func() {
+					seen.lock.Lock()
+					defer seen.lock.Unlock()
+					// must set error before setting state to topicCreateFailed
+					seen.error = overrideFinalError
+					seen.errorTime = now
+					seen.state.Store(topicCreateFailed)
+					close(seen.created)
+				}()
 				continue
 			}
 			tc.Topic = topic
@@ -252,6 +367,7 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, topics []s
 			now := time.Now()
 			for topic, err := range resp.Errors {
 				if err == nil {
+					lib.tracer.Logf("[events] %s: topic %s no error when creating", why, topic)
 					continue
 				}
 				if errors.Is(err, kafka.TopicAlreadyExists) {
