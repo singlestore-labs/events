@@ -220,6 +220,8 @@ func (lib *LibraryNoDB) waitForTopicsListing(ctx context.Context) error {
 // will be called simultaneously from multiple threads. Its behavior is optimized to do
 // minimal work and to return almost instantly if there are no topics that need creating.
 func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, topics []string) error {
+	ctx, cancelTimeout := context.WithTimeout(ctx, topicCreationDeadline)
+	defer cancelTimeout()
 	if lib.ready.Load() == isNotConfigured {
 		err := errors.Alertf("attempt to create topics before library configuration (%s)", why)
 		lib.tracer.Logf("[events] %s: %+v", why, err)
@@ -236,9 +238,7 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, topics []s
 		return err
 	}
 	var firstWorkFound bool // no point in logging much until we know there is work to do
-	var ctr kafka.CreateTopicsRequest
 	var outstanding map[string]*creatingTopic
-	var topicRequest []string
 	var overrideFinalError error
 	for _, topic := range topics {
 		seen, ok := lib.topicsSeen.Load(topic)
@@ -312,9 +312,68 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, topics []s
 			}
 
 			mir = getIntConfigValue(tc, "min.insync.replicas")
+			var ctr kafka.CreateTopicsRequest
 			ctr.Topics = append(ctr.Topics, tc)
 			lib.tracer.Logf("[events] %s: attempting creation of topic %s with replicas %d and min.insync %d", why, topic, tc.ReplicationFactor, mir)
-			topicRequest = append(topicRequest, topic)
+			go func() {
+				// This go-routine actually tries to create the topic. It makes one attempt.
+				// If the attempt succeeds, it marks topics as created. A TopicAlreadyExists
+				// error counts as success.
+				var err error
+				var client *kafka.Client
+				defer func() {
+					now := time.Now()
+					if func() bool {
+						seen.lock.Lock()
+						defer seen.lock.Unlock()
+						if err != nil {
+							// must set error before setting state to topicCreateFailed
+							seen.error = errors.WithStack(err)
+							seen.errorTime = now
+							seen.state.Store(topicCreateFailed)
+							close(seen.created)
+						} else if seen.state.Load() == topicCreating {
+							seen.state.Store(topicCreated)
+							close(seen.created)
+							return true
+						}
+						return false
+					}() {
+						lib.tracer.Logf("[events] %s: topic %s should now exist", why, topic)
+					}
+					if err != nil {
+						alert := errors.Alertf("event library error creating topic (%s) (%s): %w", topic, why, err)
+						lib.tracer.Logf("[events] %+v", alert)
+					}
+				}()
+				client, err = lib.getController(ctx)
+				if err != nil {
+					return
+				}
+				lib.tracer.Logf("[events] %s: making topic creation request for %v", why, topic)
+				resp, err := client.CreateTopics(ctx, &ctr)
+				if err == nil {
+					for tpc, topicErr := range resp.Errors {
+						if topicErr == nil {
+							lib.tracer.Logf("[events] %s: topic %s no error when creating", why, tpc)
+							continue
+						}
+						if errors.Is(topicErr, kafka.TopicAlreadyExists) {
+							lib.tracer.Logf("[events] %s: topic %s already exists", why, tpc)
+							err = nil
+							continue
+						}
+						if tpc == topic {
+							err = topicErr
+						} else {
+							_ = errors.Alertf("event library recevied create topic response for topic (%s) not in request (%s): %w", topic, why, err)
+						}
+					}
+				}
+				if resp.Throttle != 0 {
+					lib.tracer.Logf("[events] %s: topic creation request was throttled for %s", why, resp.Throttle)
+				}
+			}()
 		}
 		if outstanding == nil {
 			outstanding = make(map[string]*creatingTopic)
@@ -322,114 +381,13 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, topics []s
 		lib.tracer.Logf("[events] %s: will wait for creation attempt of topic %s to complete", why, topic)
 		outstanding[topic] = seen
 	}
-	if len(outstanding) == 0 {
+	if len(outstanding) == 0 || overrideFinalError != nil {
 		return overrideFinalError
 	}
-	// If ctr.Topics is empty, then other threads are making the topic creation request.
-	if len(ctr.Topics) != 0 {
-		setErrors := func(err error) {
-			// setErrors is used when there is an error affecting all
-			// of the topics we're requesting to be created.
-			err = errors.WithStack(err)
-			lib.tracer.Logf("[events] %s: create topics %v request failed: %+v", why, topicRequest, err)
-			now := time.Now()
-			for _, topicConfig := range ctr.Topics {
-				seen := outstanding[topicConfig.Topic]
-				func() {
-					seen.lock.Lock()
-					defer seen.lock.Unlock()
-					// must set error before setting state to topicCreateFailed
-					seen.error = err
-					seen.errorTime = now
-					seen.state.Store(topicCreateFailed)
-					close(seen.created)
-				}()
-			}
-		}
-		go func() {
-			// This go-routine actually tries to create the topics. It makes one attempt.
-			// If the attempt succeeds, it marks topics as created. A TopicAlreadyExists
-			// error counts as success.
-			client, err := lib.getController(ctx)
-			if err != nil {
-				setErrors(err)
-				return
-			}
-			lib.tracer.Logf("[events] %s: making topic creation request for %v", why, topics)
-			resp, err := client.CreateTopics(ctx, &ctr)
-			if err != nil {
-				setErrors(errors.Errorf("event library create topics (%s): %w", why, err))
-				return
-			}
-			if resp.Throttle != 0 {
-				lib.tracer.Logf("[events] %s: topic creation request was throttled for %s", why, resp.Throttle)
-			}
-			now := time.Now()
-			for topic, err := range resp.Errors {
-				if err == nil {
-					lib.tracer.Logf("[events] %s: topic %s no error when creating", why, topic)
-					continue
-				}
-				if errors.Is(err, kafka.TopicAlreadyExists) {
-					lib.tracer.Logf("[events] %s: topic %s already exists", why, topic)
-					continue
-				}
-				seen, ok := outstanding[topic]
-				if !ok {
-					_ = errors.Alertf("event library recevied create topic response for topic (%s) not in request (%s): %w", topic, why, err)
-					continue
-				}
-				alert := errors.Alertf("event library error creating topic (%s) (%s): %w", topic, why, err)
-				lib.tracer.Logf("[events] %+v", alert)
-				func() {
-					seen.lock.Lock()
-					defer seen.lock.Unlock()
-					// must set error before setting state to topicCreateFailed
-					seen.error = errors.WithStack(err)
-					seen.errorTime = now
-					seen.state.Store(topicCreateFailed)
-					close(seen.created)
-				}()
-			}
-			var succeeded int
-			for _, topicConfig := range ctr.Topics {
-				seen, ok := outstanding[topicConfig.Topic]
-				if !ok {
-					err := errors.Alertf("event library internal error creating topic (%s) (%s)", topicConfig.Topic, why)
-					lib.tracer.Logf("[events] %+v", err)
-					continue
-				}
-				if func() bool {
-					seen.lock.Lock()
-					defer seen.lock.Unlock()
-					if seen.state.Load() == topicCreating {
-						seen.state.Store(topicCreated)
-						close(seen.created)
-						return true
-					}
-					return false
-				}() {
-					lib.tracer.Logf("[events] %s: topic %s should now exist", why, topicConfig.Topic)
-					succeeded++
-				}
-			}
-			lib.tracer.Logf("[events] %s: topic creation attempt for %v is complete (%d of %d succeeded)", why, topics, succeeded, len(ctr.Topics))
-		}()
-	}
-	start := time.Now()
-	if len(outstanding) == 0 {
-		return overrideFinalError
-	}
+	lib.tracer.Logf("[events] waiting for topic creation to complete")
 	for topic, seen := range outstanding {
-		waiting := time.Since(start)
-		if waiting >= topicCreationDeadline {
-			return errors.Errorf("event library could not create kafka topic (%s) (%s): %w", topic, why, ErrTopicCreationTimeout)
-		}
-		timer := time.NewTimer(topicCreationDeadline - waiting)
-		var err error
 		select {
 		case <-seen.created:
-			timer.Stop()
 			state := seen.state.Load()
 			if state == topicCreateFailed {
 				err := func() error {
@@ -446,14 +404,8 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, topics []s
 					return err
 				}
 			}
-		case <-timer.C:
-			err = errors.Alertf("event library could not create kafka topic (%s) before timeout (%s): %w", topic, why, ErrTopicCreationTimeout)
 		case <-ctx.Done():
-			err = errors.Errorf("event library could not create kafka topic (%s) (%s): %w", topic, why, ErrTopicCreationTimeout)
-		}
-		if err != nil {
-			lib.tracer.Logf("[events] %+v", err)
-			return err
+			return errors.Errorf("event library could not create kafka topic (%s) (%s): %w", topic, why, ErrTopicCreationTimeout)
 		}
 	}
 	return overrideFinalError
