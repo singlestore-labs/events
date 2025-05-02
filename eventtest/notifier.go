@@ -12,6 +12,7 @@ import (
 	"github.com/memsql/ntest"
 	"github.com/singlestore-labs/events"
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/wait"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -45,8 +46,16 @@ func EventUnfilteredNotifierTest[
 	allChan := unfiltered3.Subscribe(lib)
 
 	id := uuid.New().String()
-	require.NoError(t, lib.Produce(ctx, eventmodels.ProduceImmediate, unfilteredNotifierTopic.Event("key-"+id,
-		myNotifierEvent{"foo": "bar"}).ID(id)))
+	t.Log("producing may take a few tries for brand new topics")
+	require.NoError(t, wait.For(func() (bool, error) {
+		err := lib.Produce(ctx, eventmodels.ProduceImmediate, unfilteredNotifierTopic.Event("key-"+id,
+			myNotifierEvent{"foo": "bar"}).ID(id))
+		if err != nil {
+			t.Logf("got error trying to produce: %v", err)
+			return false, err
+		}
+		return true, nil
+	}, wait.ExitOnError(false), wait.WithLimit(time.Second*60)))
 
 	timer := time.NewTimer(time.Minute * 3)
 Wait:
