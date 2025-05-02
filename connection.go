@@ -34,7 +34,7 @@ const (
 	broadcastParallelConsumption  = 3
 	errorSleep                    = time.Second
 	broadcastConsumerGroup        = "broadcastsGroup"
-	baseBroadcastHeartbeat        = time.Second * 20
+	baseBroadcastHeartbeat        = time.Second * 10
 	broadcastHeartbeatRandom      = 0.25
 	nonBroadcastReaderIdleTimeout = 5 * time.Minute
 	broadcastReaderIdleTimeout    = baseBroadcastHeartbeat * 3 // This cannot be < 1s: Kafka takes a while to deliver events after reader startup or generation change
@@ -393,12 +393,38 @@ func (lib *Library[ID, TX, DB]) ConsumeBroadcast(handlerName string, handler eve
 	handlers.addHandler(handlerName, eventmodels.OnFailureDiscard, &lib.LibraryNoDB, handler, opts)
 }
 
+// WithTimeout limits the duration of retries of delivery attempts on a per-message basis.
+// When the limit is exceeded, delivery is considered to have failed.
+//
+// When delivery has failed, failure handling becomes key:
+//
+// OnFailureRetryLater & OnFailureSave: the event will be sent to
+// the dead letter topic.
+//
+// OnFailureDiscard: the event will be ack'ed without processing.
+//
+// OnFailureBlock: no messages will get
+// acknowledged in the consumer group (since they must be ack'ed
+// in-order) and eventually processing of the consumer group will stall.
 func WithTimeout(d time.Duration) HandlerOpt {
 	return func(r *registeredHandler, _ *LibraryNoDB) {
 		r.timeout = d
 	}
 }
 
+// WithRetrying controls message delivery.
+// Normally, multiple attempts are made to deliver messages.
+//
+// WithRetrying(false) means only one attempt will be made.
+//
+// In connection with OnFailureRetryLater, OnFailureSave, the
+// message will be immediately sent to corresponding dead letter
+// topic. In connection with OnFailureDiscard, it will be dropped
+// after just one delivery attempt.
+//
+// In combination with OnFailureBlock, no messages will get
+// acknowledged in the consumer group (since they must be ack'ed
+// in-order) and eventually processing of the consumer group will stall.
 func WithRetrying(retry bool) HandlerOpt {
 	return func(r *registeredHandler, _ *LibraryNoDB) {
 		r.retry = retry
@@ -453,6 +479,15 @@ func WithConcurrency(parallelism int) HandlerOpt {
 	}
 }
 
+// IsDeadLetterHandler can be used when registering a handler for dead letter topics.
+// Normally this is not needed as dead letter handlers are created automatically if
+// the consumer uses OnFailureRetryLater. Using IsDeadLetterHandler only makes sense
+// for creating custom handlers to deal with OnFailureSave events. Use DeadLetterTopic
+// to form the dead letter topic name.
+//
+// Dead letter handlers record different metrics and use different simultaneous
+// runner limits. OnFailureBlock is appropriate with dead letter handler because
+// where would you save a dead letter from a dead letter consumer?
 func IsDeadLetterHandler(isDeadLetter bool) HandlerOpt {
 	return func(r *registeredHandler, _ *LibraryNoDB) {
 		r.isDeadLetter = isDeadLetter

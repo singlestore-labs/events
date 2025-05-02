@@ -73,7 +73,7 @@ type MyEvent struct {
 
 var (
 	DeliveryTimeout = LongerOnCI(20*time.Second, 10*time.Minute, 2*time.Minute)
-	StartupTimeout  = LongerOnCI(time.Minute, 5*time.Minute, time.Minute)
+	StartupTimeout  = LongerOnCI(65*time.Second, 5*time.Minute, 65*time.Second)
 )
 
 func LongerOnCI(local, gitlab, github time.Duration) time.Duration {
@@ -120,6 +120,10 @@ func GenerateSharedTestMatrix[
 		"ErrorWhenMisused":      nject.Provide("EWM", ErrorWhenMisusedTest[ID, TX, DB]),
 		"ExactlyOnceDelivery":   nject.Provide("EOD", ExactlyOnceDeliveryTest[ID, TX, DB]),
 		"IdempotentDelivery":    nject.Provide("ID", IdempotentDeliveryTest[ID, TX, DB]),
+		"OrderedBlock1CG":       nject.Provide("OB1", OrderedBlockTestOneCG[ID, TX, DB]),
+		"OrderedBlock2CG":       nject.Provide("OB2", OrderedBlockTestTwoCG[ID, TX, DB]),
+		"OrderedRetryLater1CG":  nject.Provide("ORL1", OrderedRetryTestOncCG[ID, TX, DB]),
+		"OrderedRetryLater2CG":  nject.Provide("ORL2", OrderedRetryTestTwoCG[ID, TX, DB]),
 		"UnfilteredNotifier":    nject.Provide("UN", EventUnfilteredNotifierTest[ID, TX, DB]),
 	}
 }
