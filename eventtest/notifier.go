@@ -19,10 +19,6 @@ import (
 
 type myNotifierEvent map[string]string
 
-var unfilteredNotifierTopic = eventmodels.BindTopic[myNotifierEvent]("TestEventUnfilteredNotifier")
-
-var unfiltered3 = events.RegisterUnfiltered("TestEventUnfilteredNotifier-registration", unfilteredNotifierTopic, events.Async(10))
-
 func EventUnfilteredNotifierTest[
 	ID eventmodels.AbstractID[ID],
 	TX eventmodels.EnhancedTX,
@@ -34,6 +30,9 @@ func EventUnfilteredNotifierTest[
 	brokers Brokers,
 	cancel Cancel,
 ) {
+	unfilteredNotifierTopic := eventmodels.BindTopic[myNotifierEvent]("TestEventUnfilteredNotifier")
+	unfiltered3 := events.RegisterUnfiltered("TestEventUnfilteredNotifier-registration", unfilteredNotifierTopic, events.Async(10))
+
 	origT := t
 	t = ntest.ExtraDetailLogger(origT, "UNT")
 	lib := events.New[ID, TX, DB]()
@@ -81,19 +80,6 @@ Wait:
 
 var notifierTopic = eventmodels.BindTopic[myNotifierEvent]("TestEventComprehensiveNotifier")
 
-// The order of filtered & unfiltered matters here because broadcast events
-// are delivered synchronously and the inner unfiltered receivers wait for the
-// filtered receiver to have triggered before they consume. If unfiltered is
-// first, the test deadlocks.
-
-var filtered = events.RegisterFiltered("TestEventComprehensiveNotifier-filtered", notifierTopic, func(e eventmodels.Event[myNotifierEvent]) string {
-	return e.Payload["quarter"]
-})
-
-var unfiltered1 = events.RegisterUnfiltered("TestEventComprehensiveNotifier-unfiltered1", notifierTopic, events.Async(10))
-
-var unfiltered2 = events.RegisterUnfiltered("TestEventComprehensiveNotifier-unfiltered2", notifierTopic, events.Async(-1))
-
 func EventComprehensiveNotifierTest[
 	ID eventmodels.AbstractID[ID],
 	TX eventmodels.EnhancedTX,
@@ -105,6 +91,17 @@ func EventComprehensiveNotifierTest[
 	brokers Brokers,
 	cancel Cancel,
 ) {
+	// The order of filtered & unfiltered matters here because broadcast events
+	// are delivered synchronously and the inner unfiltered receivers wait for the
+	// filtered receiver to have triggered before they consume. If unfiltered is
+	// first, the test deadlocks.
+
+	filtered := events.RegisterFiltered("TestEventComprehensiveNotifier-filtered", notifierTopic, func(e eventmodels.Event[myNotifierEvent]) string {
+		return e.Payload["quarter"]
+	})
+	unfiltered1 := events.RegisterUnfiltered("TestEventComprehensiveNotifier-unfiltered1", notifierTopic, events.Async(10))
+	unfiltered2 := events.RegisterUnfiltered("TestEventComprehensiveNotifier-unfiltered2", notifierTopic, events.Async(-1))
+
 	const threadCount = 10
 	const requiredIterations = 3
 	const stopAfter = (threadCount*requiredIterations*2 + 1) * 5
