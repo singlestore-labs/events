@@ -34,7 +34,7 @@ type ComboDB[ID eventmodels.AbstractID[ID], TX BasicTX] interface {
 	eventmodels.AbstractDB[ID, TX]
 }
 
-type SaveEventsFunc[ID eventmodels.AbstractID[ID], TX BasicTX] func(context.Context, eventmodels.Tracer, TX, eventmodels.Producer[ID, TX], ...eventmodels.ProducingEvent) (map[string][]ID, error)
+type SaveEventsFunc[ID eventmodels.AbstractID[ID], TX BasicTX] func(context.Context, eventmodels.Tracer, TX, eventmodels.CanValidateTopics, ...eventmodels.ProducingEvent) (map[string][]ID, error)
 
 // Transact implements a Transact method as needed by AbstractDB (in ComboDB).
 // It does not call itself recursively and insteads depends upon BeginTx
@@ -96,7 +96,7 @@ func WrapTransaction[ID eventmodels.AbstractID[ID], TX BasicTX, DB BasicDB[TX]](
 			return err
 		}
 		if pending := tx.GetPendingEvents(); len(pending) != 0 {
-			err := ValidateEventTopics[ID, TX](ctx, producer, pending...)
+			err := ValidateEventTopics(ctx, producer, pending...)
 			if err != nil {
 				return err
 			}
@@ -110,9 +110,9 @@ func WrapTransaction[ID eventmodels.AbstractID[ID], TX BasicTX, DB BasicDB[TX]](
 	return ids, err
 }
 
-func ValidateEventTopics[ID eventmodels.AbstractID[ID], TX BasicTX](
+func ValidateEventTopics(
 	ctx context.Context,
-	producer eventmodels.Producer[ID, TX],
+	producer eventmodels.CanValidateTopics,
 	events ...eventmodels.ProducingEvent,
 ) error {
 	if producer == nil {

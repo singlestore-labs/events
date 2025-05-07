@@ -48,6 +48,7 @@ type AbstractIDMethods interface {
 // Producer is implemented by events.Library. It's an interface so that
 // import cycles can be avoided.
 type Producer[ID AbstractID[ID], TX AbstractTX] interface {
+	CanValidateTopics
 	DB() AbstractDB[ID, TX]
 	Produce(context.Context, ProduceMethod, ...ProducingEvent) error
 	// ProduceFromTable should be called by transaction wappers. It will
@@ -57,6 +58,10 @@ type Producer[ID AbstractID[ID], TX AbstractTX] interface {
 	RecordErrorNoWait(string, error) error // does not pause
 	IsConfigured() bool
 	Tracer() Tracer
+	ValidateTopics(context.Context, []string) error
+}
+
+type CanValidateTopics interface {
 	ValidateTopics(context.Context, []string) error
 }
 
