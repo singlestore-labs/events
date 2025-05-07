@@ -34,7 +34,7 @@ type ComboDB[ID eventmodels.AbstractID[ID], TX BasicTX] interface {
 	eventmodels.AbstractDB[ID, TX]
 }
 
-type SaveEventsFunc[ID eventmodels.AbstractID[ID], TX BasicTX] func(context.Context, eventmodels.Tracer, TX, ...eventmodels.ProducingEvent) (map[string][]ID, error)
+type SaveEventsFunc[ID eventmodels.AbstractID[ID], TX BasicTX] func(context.Context, eventmodels.Tracer, TX, eventmodels.Producer[ID, TX], ...eventmodels.ProducingEvent) (map[string][]ID, error)
 
 // Transact implements a Transact method as needed by AbstractDB (in ComboDB).
 // It does not call itself recursively and insteads depends upon BeginTx
@@ -96,23 +96,11 @@ func WrapTransaction[ID eventmodels.AbstractID[ID], TX BasicTX, DB BasicDB[TX]](
 			return err
 		}
 		if pending := tx.GetPendingEvents(); len(pending) != 0 {
-			if producer != nil {
-				topics := make([]string, 0, len(pending))
-				seen := make(map[string]struct{}, len(pending))
-				for _, event := range pending {
-					topic := event.GetTopic()
-					if _, ok := seen[topic]; !ok {
-						seen[topic] = struct{}{}
-						topics = append(topics, topic)
-					}
-				}
-				err := producer.ValidateTopics(ctx, topics)
-				if err != nil {
-					return err
-				}
+			err := ValidateEventTopics[ID, TX](ctx, producer, pending...)
+			if err != nil {
+				return err
 			}
-			var err error
-			ids, err = saveEvents(ctx, tracer, tx, pending...)
+			ids, err = saveEvents(ctx, tracer, tx, producer, pending...)
 			if err != nil {
 				return err
 			}
@@ -120,4 +108,24 @@ func WrapTransaction[ID eventmodels.AbstractID[ID], TX BasicTX, DB BasicDB[TX]](
 		return nil
 	}()
 	return ids, err
+}
+
+func ValidateEventTopics[ID eventmodels.AbstractID[ID], TX BasicTX](
+	ctx context.Context,
+	producer eventmodels.Producer[ID, TX],
+	events ...eventmodels.ProducingEvent,
+) error {
+	if producer == nil {
+		return nil
+	}
+	topics := make([]string, 0, len(events))
+	seen := make(map[string]struct{}, len(events))
+	for _, event := range events {
+		topic := event.GetTopic()
+		if _, ok := seen[topic]; !ok {
+			seen[topic] = struct{}{}
+			topics = append(topics, topic)
+		}
+	}
+	return producer.ValidateTopics(ctx, topics)
 }
