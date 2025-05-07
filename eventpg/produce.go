@@ -281,11 +281,11 @@ func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, t
 
 // SaveEventsInsideTx is meant to be used inside a transaction to persist
 // events as part of that transaction.
-func SaveEventsInsideTx[TX eventmodels.AbstractTX, BasicTX eventdb.BasicTX](ctx context.Context, tracer eventmodels.Tracer, tx TX, producer eventmodels.Producer[eventmodels.StringEventID, BasicTX], events ...eventmodels.ProducingEvent) (map[string][]eventmodels.StringEventID, error) {
+func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer eventmodels.Tracer, tx TX, producer eventmodels.CanValidateTopics, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.StringEventID, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
-	err := eventdb.ValidateEventTopics[eventmodels.StringEventID, BasicTX](ctx, producer, events...)
+	err := eventdb.ValidateEventTopics(ctx, producer, events...)
 	if err != nil {
 		return nil, err
 	}
