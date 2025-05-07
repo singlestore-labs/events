@@ -77,7 +77,7 @@ func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic
 }
 
 func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tracer eventmodels.Tracer, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.StringEventID, error) {
-	return SaveEventsInsideTx[TX](ctx, tracer, tx, events...)
+	return SaveEventsInsideTx[TX](ctx, tracer, tx, c.producer, events...)
 }
 
 func LockOrError[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ctx context.Context, db DB, key uint32, timeout time.Duration) (unlock func() error, err error) {
@@ -281,9 +281,13 @@ func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, t
 
 // SaveEventsInsideTx is meant to be used inside a transaction to persist
 // events as part of that transaction.
-func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer eventmodels.Tracer, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.StringEventID, error) {
+func SaveEventsInsideTx[TX eventmodels.AbstractTX, BasicTX eventdb.BasicTX](ctx context.Context, tracer eventmodels.Tracer, tx TX, producer eventmodels.Producer[eventmodels.StringEventID, BasicTX], events ...eventmodels.ProducingEvent) (map[string][]eventmodels.StringEventID, error) {
 	if len(events) == 0 {
 		return nil, nil
+	}
+	err := eventdb.ValidateEventTopics[eventmodels.StringEventID, BasicTX](ctx, producer, events...)
+	if err != nil {
+		return nil, err
 	}
 	ids := eventdb.PreAllocateIDMap[eventmodels.StringEventID](events...)
 	ib := sq.Insert("eventsOutgoing").
