@@ -38,8 +38,8 @@ github.com/lestrrat-go/option v1.0.0 h1:WqAWL8kh8VcSoD6xjSH34/1m8yxluXQbDeKNfvFe
 github.com/lestrrat-go/option v1.0.0/go.mod h1:5ZHFbivi4xwXxhxY9XHDe2FHo6/Z7WWmtT7T5nBBp3I=
 github.com/lib/pq v1.10.9 h1:YXG7RB+JIjhP29X+OtkiDnYaXQwpS4JEWq7dtCCRUEw=
 github.com/lib/pq v1.10.9/go.mod h1:AlVN5x4E4T544tWzH6hKfbfQvm3HdbOxrmggDNAPY9o=
-github.com/memsql/errors v0.1.0 h1:TcYi6OOSlxrJhcgD79AdXGYzgb7+ZVLy71HEvPJylvM=
-github.com/memsql/errors v0.1.0/go.mod h1:82DslK+/CPzNprzYkjXk70ZHzzGCESIyv9PfH/hYcaQ=
+github.com/memsql/errors v0.2.0 h1:n1KKG0TRC0cqUmdropM9ygMDXbGORIN4HmbqU3y3SbM=
+github.com/memsql/errors v0.2.0/go.mod h1:82DslK+/CPzNprzYkjXk70ZHzzGCESIyv9PfH/hYcaQ=
 github.com/memsql/keyeddistributor v0.1.0 h1:JpouaTyKp8Q67vbcv/t6JCWWOazo2LQMf/S+yl0BMs4=
 github.com/memsql/keyeddistributor v0.1.0/go.mod h1:GD9Oam+jec0VPLp3fqKILCXTnykIGHK3crKtXS8Ju4Q=
 github.com/memsql/ntest v0.5.0 h1:FqS8XGLm0lzLKFdRXIl+hZw1FnPDvxCNB17TeBh2HZ8=

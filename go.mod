@@ -9,7 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/backoff/v2 v2.0.8
 	github.com/lib/pq v1.10.9
-	github.com/memsql/errors v0.1.0
+	github.com/memsql/errors v0.2.0
 	github.com/memsql/keyeddistributor v0.1.0
 	github.com/memsql/ntest v0.5.0
 	github.com/muir/gwrap v0.4.0
