@@ -140,6 +140,9 @@ Topics:
 // precreateTopicsForConsuming makes sure that the topics to be consumed exist.
 // It blocks until they do.
 func (lib *LibraryNoDB) precreateTopicsForConsuming(ctx context.Context, consumerGroup consumerGroupName, topics []string) error {
+	if debugConsumeStartup {
+		lib.tracer.Logf("[events] Debug: pre-creating topics: %v", topics)
+	}
 	var priorError bool
 	b := backoffPolicy.Start(ctx)
 	for {
@@ -151,7 +154,7 @@ func (lib *LibraryNoDB) precreateTopicsForConsuming(ctx context.Context, consume
 			return nil
 		}
 		priorError = true
-		_ = errors.Alertf("could not create topics needed to consume group (%s): %w", consumerGroup, err)
+		_ = lib.RecordErrorNoWait("preCreateTopicsForConsume", err)
 		if errors.Is(err, UnregisteredTopicError) {
 			return err
 		}

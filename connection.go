@@ -27,21 +27,24 @@ var _ eventmodels.Producer[eventmodels.StringEventID, eventmodels.AbstractTX] = 
 
 // These could all become configurable if needed
 const (
-	maxBytes                      = 10e6 // 10MB
-	readCommitInterval            = time.Second
-	commitQueueDepth              = 1000
-	limiterStuckMessageAfter      = time.Minute
-	broadcastParallelConsumption  = 3
-	errorSleep                    = time.Second
-	broadcastConsumerGroup        = "broadcastsGroup"
-	baseBroadcastHeartbeat        = time.Second * 10
-	broadcastHeartbeatRandom      = 0.25
-	nonBroadcastReaderIdleTimeout = 5 * time.Minute
-	broadcastReaderIdleTimeout    = baseBroadcastHeartbeat * 3 // This cannot be < 1s: Kafka takes a while to deliver events after reader startup or generation change
-	maxConsumerGroupNameLength    = 35
-	dialTimeout                   = time.Minute * 2
-	deleteTimeout                 = time.Minute * 2
-	produceFromTableBuffer        = 512
+	maxBytes                            = 10e6 // 10MB
+	readCommitInterval                  = time.Second
+	commitQueueDepth                    = 1000
+	limiterStuckMessageAfter            = time.Minute
+	broadcastParallelConsumption        = 3
+	errorSleep                          = time.Second
+	baseBroadcastHeartbeat              = time.Second * 10
+	broadcastHeartbeatRandom            = 0.25
+	broadcastNotCoordinatorErrorRetries = 50
+	nonBroadcastReaderIdleTimeout       = 5 * time.Minute
+	broadcastReaderIdleTimeout          = baseBroadcastHeartbeat * 3 // This cannot be < 1s: Kafka takes a while to deliver events after reader startup or generation change
+	maxConsumerGroupNameLength          = 35
+	dialTimeout                         = time.Minute * 2
+	deleteTimeout                       = time.Minute * 2
+	describeTimeout                     = time.Minute * 2
+	produceFromTableBuffer              = 512
+	readerStartupSleep                  = time.Millisecond * 100
+	readerStartupReport                 = time.Minute
 
 	// maximumParallelConsumption limits the number of handlers that can run at once.
 	// The larger this number, the more memory and CPU devoted to event processing. The
@@ -549,7 +552,7 @@ func (h *registeredHandler) Name() string          { return h.name }
 func (h *registeredHandler) BaseTopic() string     { return h.baseTopic }
 func (h *registeredHandler) ConsumerGroup() string { return h.consumerGroup.String() }
 
-func (lib *Library[ID, TX, DB]) RecordErrorNoWait(category string, err error) error {
+func (lib *LibraryNoDB) RecordErrorNoWait(category string, err error) error {
 	ErrorCounts.WithLabelValues(category).Inc()
 	if lib.tracer != nil {
 		lib.tracer.Logf("[events] %s error: %+v", category, err)
@@ -559,7 +562,7 @@ func (lib *Library[ID, TX, DB]) RecordErrorNoWait(category string, err error) er
 	return errors.Alertf("events error %s: %w", category, err)
 }
 
-func (lib *Library[ID, TX, DB]) RecordError(category string, err error) error {
+func (lib *LibraryNoDB) RecordError(category string, err error) error {
 	err = lib.RecordErrorNoWait(category, err)
 	time.Sleep(errorSleep)
 	return err
@@ -627,10 +630,10 @@ func (lib *Library[ID, TX, DB]) getConsumerGroupCoordinator(ctx context.Context,
 		KeyType: kafka.CoordinatorKeyTypeConsumer,
 	})
 	if err != nil {
-		return nil, errors.Errorf("find coordinator for consumer control group (%s): %w", consumerGroup, err)
+		return nil, errors.Errorf("find coordinator for consumer group (%s): %w", consumerGroup, err)
 	}
 	if resp.Error != nil {
-		return nil, errors.Errorf("find coordinator for consumer control group (%s): %w", consumerGroup, resp.Error)
+		return nil, errors.Errorf("find coordinator for consumer group (%s): %w", consumerGroup, resp.Error)
 	}
 	if resp.Coordinator.Host == "" {
 		// Err, what's going on here? Can we really assume that the consumer group doesn't exist?
