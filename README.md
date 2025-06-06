@@ -252,7 +252,18 @@ features are not available:
 
 For production use, configure:
 
-- at least 3 availablity zones (replicas);
-- `min.insync.replicas` to be at least 2;
-- `replication.factor` to be at least one more than `min.insync.replicas` and equal to your number of replicas.
+At least 3 availability zones (replicas) and each topic needs:
 
+- `min.insync.replicas`: at least 2 and less than the number of availability zones
+- `replication.factor`: the number of availabilty zones 
+
+Because broadcast topics sometimes use the `offsetsForTimes` request, message timestamps must be
+set to the the non-default value of `LogAppendTime`. This is the default for topics created by
+the events library. See [discusstion with ChatGPT](https://chatgpt.com/share/68432d60-ac28-8005-bea1-cf3c175204ba)
+about why this is important.
+
+- `message.timestamp.type`: `LogAppendTime`
+
+Since the message timestamps will use the log append time, if message consumers want to know when
+the message was created, a second timestamp needs to be within the message itself. Perhaps as
+a header.

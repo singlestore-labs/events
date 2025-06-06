@@ -45,6 +45,8 @@ const (
 	produceFromTableBuffer              = 512
 	readerStartupSleep                  = time.Millisecond * 100
 	readerStartupReport                 = time.Minute
+	defaultBroadcastConsumerBaseName    = "broadcastConsumer"
+	defaultLockFreeBroadcastBase        = "broadcastLFConsumer"
 
 	// maximumParallelConsumption limits the number of handlers that can run at once.
 	// The larger this number, the more memory and CPU devoted to event processing. The
@@ -107,6 +109,7 @@ type LibraryNoDB struct {
 	producerRunning           atomic.Int32
 	broadcastConsumerBaseName string
 	broadcastConsumerMaxLock  uint32
+	broadcastConsumerSkipLock bool
 	doEnhance                 bool
 	ProduceSyncCount          atomic.Uint64 // used and exported for testing only
 	instanceID                int32
@@ -214,15 +217,14 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 				topics:  make(map[string]*topicHandlers),
 				maxIdle: broadcastReaderIdleTimeout,
 			},
-			topicConfig:               make(map[string]kafka.TopicConfig),
-			clientID:                  uuid.New().String(),
-			broadcastHeartbeat:        baseBroadcastHeartbeat,
-			heartbeatRandomness:       broadcastHeartbeatRandom,
-			broadcastConsumerBaseName: "broadcastConsumer",
-			broadcastConsumerMaxLock:  200,
-			doEnhance:                 true,
-			instanceID:                instanceCount.Add(1),
-			topicsHaveBeenListed:      make(chan struct{}),
+			topicConfig:              make(map[string]kafka.TopicConfig),
+			clientID:                 uuid.New().String(),
+			broadcastHeartbeat:       baseBroadcastHeartbeat,
+			heartbeatRandomness:      broadcastHeartbeatRandom,
+			broadcastConsumerMaxLock: 200,
+			doEnhance:                true,
+			instanceID:               instanceCount.Add(1),
+			topicsHaveBeenListed:     make(chan struct{}),
 		},
 	}
 }
@@ -246,6 +248,23 @@ func (lib *Library[ID, TX, DB]) SetBroadcastConsumerMaxLocks(max uint32) {
 	defer lib.lock.Unlock()
 	lib.mustNotBeRunning("attempt configure event library that is already processing")
 	lib.broadcastConsumerMaxLock = max
+}
+
+// DoNotLockBroadcastConsumerNumbers must be used before starting the library. If called,
+// no database locks will be taken to reserve broadcast consumer numbers. There is a
+// tradeoff: this saves a database connection that would otherwise sit around holding
+// a lock, but it makes the allocation and refreshing of broadcast consumers much more
+// expensive in terms of interactions with Kafka.
+//
+// It is safe to use this in combination with other broadcast consumers that do take
+// locks: they'll use different namespace prefixes unless you mess that up by
+// using SetBroadcastConsumerBaseName() with the same name for both lock-free and locked
+// instances.
+func (lib *Library[ID, TX, DB]) DoNotLockBroadcastConsumerNumbers() {
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	lib.mustNotBeRunning("attempt configure event library that is already processing")
+	lib.broadcastConsumerSkipLock = true
 }
 
 // SetLazyTxProduce controls what to do if a transaction produces an event but

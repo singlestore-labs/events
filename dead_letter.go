@@ -106,7 +106,7 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(ctx context.Context, co
 		if debugConsumeStartup {
 			lib.tracer.Logf("[events] Debug: consume startwait +1 for %s", consumerGroup+deadLetterGroupPostfix)
 		}
-		go lib.startConsumingGroup(ctx, consumerGroup+deadLetterGroupPostfix, dlGroup, limiter, false, allStarted, allDone, true)
+		go lib.startConsumingGroup(ctx, consumerGroup+deadLetterGroupPostfix, dlGroup, limiter, false, allStarted, allDone, true, nil, nil, nil)
 	}
 }
 
