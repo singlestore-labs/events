@@ -20,6 +20,7 @@ import (
 	"github.com/muir/libschema/lssinglestore"
 	"github.com/muir/nject/v2"
 	"github.com/muir/testinglogur"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/singlestore-labs/events"
@@ -142,6 +143,9 @@ func TestLockingLockOrDie(t *testing.T) {
 			if errors.Is(err, eventmodels.TimeoutErr) {
 				t.Logf("failed to get lock in %s, timeout", time.Since(timeStart))
 				failed.Add(1)
+				return
+			}
+			if !assert.NoError(t, err, "we shouldn't have some different error") {
 				return
 			}
 			t.Logf("got lock in %s", time.Since(timeStart))

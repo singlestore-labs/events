@@ -19,6 +19,14 @@ import (
 
 type myNotifierEvent map[string]string
 
+var (
+	// We protect these variables because the test can run more than once but must have the same values
+	// We don't do this in init because it causes side effects (broadcast consumers) that may or may not be running
+	unfilteredBindLock      sync.Mutex
+	unfilteredNotifierTopic eventmodels.BoundTopic[myNotifierEvent]
+	unfiltered3             events.Unfiltered[myNotifierEvent]
+)
+
 func EventUnfilteredNotifierTest[
 	ID eventmodels.AbstractID[ID],
 	TX eventmodels.EnhancedTX,
@@ -30,14 +38,22 @@ func EventUnfilteredNotifierTest[
 	brokers Brokers,
 	cancel Cancel,
 ) {
-	unfilteredNotifierTopic := eventmodels.BindTopic[myNotifierEvent]("TestEventUnfilteredNotifier")
-	unfiltered3 := events.RegisterUnfiltered("TestEventUnfilteredNotifier-registration", unfilteredNotifierTopic, events.Async(10))
+	func() {
+		unfilteredBindLock.Lock()
+		defer unfilteredBindLock.Unlock()
+		if unfilteredNotifierTopic == "" {
+			unfilteredNotifierTopic = eventmodels.BindTopic[myNotifierEvent]("TestEventUnfilteredNotifier")
+			unfiltered3 = events.RegisterUnfiltered("TestEventUnfilteredNotifier-registration", unfilteredNotifierTopic, events.Async(10))
+		}
+	}()
 
 	origT := t
 	t = ntest.ExtraDetailLogger(origT, "UNT")
 	lib := events.New[ID, TX, DB]()
-	lib.SetEnhanceDB(true)
-	conn.AugmentWithProducer(lib)
+	if !IsNilDB(conn) {
+		lib.SetEnhanceDB(true)
+		conn.AugmentWithProducer(lib)
+	}
 	lib.Configure(conn, ntest.ExtraDetailLogger(origT, "UNT-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 
 	consumeDone := lib.StartConsumingOrPanic(ctx)
@@ -80,6 +96,15 @@ Wait:
 
 var notifierTopic = eventmodels.BindTopic[myNotifierEvent]("TestEventComprehensiveNotifier")
 
+var (
+	// We protect these variables because the test can run more than once but must have the same values
+	// We don't do this in init because it causes side effects (broadcast consumers) that may or may not be running
+	comprehensiveBindLock sync.Mutex
+	filtered              events.Filtered[string, myNotifierEvent]
+	unfiltered1           events.Unfiltered[myNotifierEvent]
+	unfiltered2           events.Unfiltered[myNotifierEvent]
+)
+
 func EventComprehensiveNotifierTest[
 	ID eventmodels.AbstractID[ID],
 	TX eventmodels.EnhancedTX,
@@ -91,16 +116,26 @@ func EventComprehensiveNotifierTest[
 	brokers Brokers,
 	cancel Cancel,
 ) {
+	if IsNilDB(conn) {
+		// In theory this test could run w/o a database, but it would likely fail due to timing issues
+		t.Skipf("%s requires a database", t.Name())
+	}
 	// The order of filtered & unfiltered matters here because broadcast events
 	// are delivered synchronously and the inner unfiltered receivers wait for the
 	// filtered receiver to have triggered before they consume. If unfiltered is
 	// first, the test deadlocks.
 
-	filtered := events.RegisterFiltered("TestEventComprehensiveNotifier-filtered", notifierTopic, func(e eventmodels.Event[myNotifierEvent]) string {
-		return e.Payload["quarter"]
-	})
-	unfiltered1 := events.RegisterUnfiltered("TestEventComprehensiveNotifier-unfiltered1", notifierTopic, events.Async(10))
-	unfiltered2 := events.RegisterUnfiltered("TestEventComprehensiveNotifier-unfiltered2", notifierTopic, events.Async(-1))
+	func() {
+		comprehensiveBindLock.Lock()
+		defer comprehensiveBindLock.Unlock()
+		if filtered == nil {
+			filtered = events.RegisterFiltered("TestEventComprehensiveNotifier-filtered", notifierTopic, func(e eventmodels.Event[myNotifierEvent]) string {
+				return e.Payload["quarter"]
+			})
+			unfiltered1 = events.RegisterUnfiltered("TestEventComprehensiveNotifier-unfiltered1", notifierTopic, events.Async(10))
+			unfiltered2 = events.RegisterUnfiltered("TestEventComprehensiveNotifier-unfiltered2", notifierTopic, events.Async(-1))
+		}
+	}()
 
 	const threadCount = 10
 	const requiredIterations = 3
