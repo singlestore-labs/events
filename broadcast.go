@@ -38,78 +38,119 @@ const (
 //
 // Unfortunately, removing and creating topics can be kinda slow so this can delay the startup
 // of servers that consume broadcasts if they wait for StartConsuming() to complete.
-func (lib *Library[ID, TX, DB]) consumeBroadcast(ctx context.Context, allStarted *sync.WaitGroup, allDone *sync.WaitGroup) (err error) {
-	var broadcastConsumerGroup consumerGroupName
-	idAllocator := newIDAllocator(startingMaxLockID, maxLockIDMinIncrement, maxLockIDMinMultiplier, lib.broadcastConsumerMaxLock)
-	var unlock func() error
-	defer func() {
-		if unlock != nil {
-			if err != nil {
-				_ = unlock()
-			} else {
-				go func() {
-					<-ctx.Done()
-					_ = unlock()
-				}()
-			}
-		}
-	}()
-	err = lib.precreateTopicsForConsuming(ctx, "broadcast", broadcastTopics(generic.Keys(lib.broadcast.topics)))
+func (lib *Library[ID, TX, DB]) consumeBroadcast(ctx context.Context, allStarted *sync.WaitGroup, allDone *sync.WaitGroup) error {
+	err := lib.precreateTopicsForConsuming(ctx, "broadcast", broadcastTopics(generic.Keys(lib.broadcast.topics)))
 	if err != nil {
 		return err
 	}
+	limiter := simultaneous.New[eventLimiterType](maximumParallelConsumption)
+	broadcastConsumerGroup, reader, readerConfig, unlock, err := lib.getBroadcastConsumerGroup(ctx, false)
+	if err != nil {
+		return err
+	}
+	go lib.startConsumingGroup(ctx, broadcastConsumerGroup, lib.broadcast, limiter, true, allStarted, allDone, false, reader, readerConfig, unlock)
+	return nil
+}
+
+func (lib *Library[ID, TX, DB]) getBroadcastConsumerGroup(ctx context.Context, waitForever bool) (_ consumerGroupName, reader *kafka.Reader, readerConfig *kafka.ReaderConfig, unlock func() error, err error) {
+	idAllocator := newIDAllocator(startingMaxLockID, maxLockIDMinIncrement, maxLockIDMinMultiplier, lib.broadcastConsumerMaxLock)
+	defer func() {
+		if unlock != nil && err != nil {
+			_ = unlock()
+			unlock = nil
+		}
+	}()
+	broadcastConsumerBaseName := lib.broadcastConsumerBaseName
+	var broadcastConsumerGroup consumerGroupName
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", nil, nil, unlock, err
+		}
 		potentialLock, err := idAllocator.get()
 		if err != nil {
-			return err
+			return "", nil, nil, unlock, err
 		}
-
 		if unlock != nil {
 			_ = unlock()
+			unlock = nil
 		}
-		if lib.db != nil {
+		if lib.db != nil && !lib.broadcastConsumerSkipLock {
 			var err error
 			// We do not unlock on success -- the lock is held until the context is cancelled
 			unlock, err = lib.db.LockOrError(ctx, potentialLock, 0)
-			if err != nil {
-				if errors.Is(err, eventmodels.TimeoutErr) {
-					continue
-				}
-				if errors.Is(err, eventmodels.NotImplementedErr) {
-					return err
-				}
+			switch {
+			case err == nil:
+				// great, we've got the lock
+			case errors.Is(err, eventmodels.TimeoutErr):
+				continue
+			case errors.Is(err, eventmodels.NotImplementedErr):
+				// no lock, and we should disable locking
+				lib.tracer.Logf("[events] discovered at run time that our database doesn't support locking")
+				// This is safe to change without a lock because the only place this is touched
+				// post-startup is in this function and there will be only one instance of this function
+				// running.
+				lib.broadcastConsumerSkipLock = true
+			default:
 				_ = lib.RecordError("lock-attempt", err)
 				continue
 			}
-			broadcastConsumerGroup = consumerGroupName(lib.broadcastConsumerBaseName + "-" + strconv.Itoa(int(potentialLock)))
 		}
-		reader, err := lib.getBroadcastReader(ctx, broadcastConsumerGroup, true)
+		if broadcastConsumerBaseName == "" {
+			if lib.db == nil || lib.broadcastConsumerSkipLock {
+				broadcastConsumerBaseName = defaultLockFreeBroadcastBase
+			} else {
+				broadcastConsumerBaseName = defaultBroadcastConsumerBaseName
+			}
+		}
+		broadcastConsumerGroup = consumerGroupName(broadcastConsumerBaseName + "-" + strconv.Itoa(int(potentialLock)))
+		reader, readerConfig, err = lib.getBroadcastReader(ctx, broadcastConsumerGroup, true)
 		if err != nil {
 			if errors.Is(err, errGroupUnavailable) {
 				lib.tracer.Logf("[events] potential broadcast group %s was not available: %s", broadcastConsumerGroup, err)
 				continue
 			}
 			lib.tracer.Logf("[events] could not allocate broadcast consumer group %s: %+v", broadcastConsumerGroup, err)
-			return err
+			if !waitForever {
+				return "", nil, nil, unlock, err
+			}
+			continue
 		}
-		_ = reader.Close()
 		break
 	}
 	lib.tracer.Logf("[events] using consumer group %s for receiving broadcasts", broadcastConsumerGroup)
 	lib.broadcastConsumerGroupName.Store(broadcastConsumerGroup)
-	limiter := simultaneous.New[eventLimiterType](maximumParallelConsumption)
-	go lib.startConsumingGroup(ctx, broadcastConsumerGroup, lib.broadcast, limiter, true, allStarted, allDone, false)
-	return nil
+	return broadcastConsumerGroup, reader, readerConfig, unlock, nil
 }
 
 const errGroupUnavailable errors.String = "consumer group is unavailable"
 
+// refreshBroadcastReader attempts to re-allocate the same group that was already being used. If that's not successful,
+// it will allocate a fresh group.
+func (lib *Library[ID, TX, DB]) refreshBroadcastReader(ctx context.Context, broadcastConsumerGroup consumerGroupName, unlock *func() error) (consumerGroupName, *kafka.Reader, *kafka.ReaderConfig, error) {
+	reader, readerConfig, err := lib.getBroadcastReader(ctx, broadcastConsumerGroup, false)
+	if err != nil {
+		if *unlock != nil {
+			_ = (*unlock)()
+			*unlock = nil
+		}
+		consumerGroupName, reader, readerConfig, newUnlock, err := lib.getBroadcastConsumerGroup(ctx, true)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		*unlock = newUnlock
+		return consumerGroupName, reader, readerConfig, nil
+	}
+	return broadcastConsumerGroup, reader, readerConfig, nil
+}
+
 // getBroadcastReader tries to ensure exclusive access to the consumer group
-func (lib *Library[ID, TX, DB]) getBroadcastReader(ctx context.Context, broadcastConsumerGroup consumerGroupName, resetPosition bool) (reader *kafka.Reader, err error) {
+func (lib *Library[ID, TX, DB]) getBroadcastReader(ctx context.Context, broadcastConsumerGroup consumerGroupName, resetPosition bool) (reader *kafka.Reader, readerConfig *kafka.ReaderConfig, err error) {
+	lib.tracer.Logf("[events] getting consumer group coordinator for %s", broadcastConsumerGroup)
+
 	// We delete the consumer group to reset it's position to now.
 	err = lib.deleteBroadcastConsumerGroup(ctx, broadcastConsumerGroup)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Make sure to close the reader if there is an error
@@ -122,10 +163,10 @@ func (lib *Library[ID, TX, DB]) getBroadcastReader(ctx context.Context, broadcas
 
 	// We get a reader. Once we check that there is exactly one reader, we know we have exclusive use
 	// of the group because any other thread will see more than one reader
-	reader, _, _, err = lib.getReader(ctx, broadcastConsumerGroup, broadcastTopics(generic.Keys(lib.broadcast.topics)), true, resetPosition)
+	reader, _, readerConfig, err = lib.getReader(ctx, broadcastConsumerGroup, broadcastTopics(generic.Keys(lib.broadcast.topics)), true, resetPosition)
 	if err != nil {
 		// context was cancelled
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 
 	b := backoffPolicy.Start(ctx)
@@ -142,12 +183,12 @@ FreshClient:
 			// perfect
 		case isTransientCoordinatorError(err):
 			if !backoff.Continue(b) {
-				return nil, errGroupUnavailable.Errorf("could not start broadcast consumer, failed to get coordinator for group (%s): %w", broadcastConsumerGroup, err)
+				return nil, nil, errGroupUnavailable.Errorf("could not start broadcast consumer, failed to get coordinator for group (%s): %w", broadcastConsumerGroup, err)
 			}
 			_ = lib.RecordErrorNoWait("timeout-consume-broadcast", errors.Errorf("failed to get coordinator for group (%s): %w", broadcastConsumerGroup, err))
 			continue FreshClient
 		default:
-			return nil, err
+			return nil, nil, err
 		}
 
 		// We check the number of readers with describe
@@ -160,38 +201,38 @@ FreshClient:
 		if err != nil {
 			if errors.Is(err, kafka.RequestTimedOut) {
 				if !backoff.Continue(b) {
-					return nil, errors.Errorf("could not start broadcast consumer, describe consumer group (%s): %w", broadcastConsumerGroup, err)
+					return nil, nil, errors.Errorf("could not start broadcast consumer, describe consumer group (%s): %w", broadcastConsumerGroup, err)
 				}
 				_ = lib.RecordErrorNoWait("timeout-consume-broadcast", errors.Errorf("describe consumer group (%s) failed: %w", broadcastConsumerGroup, err))
 				continue FreshClient
 			}
-			return nil, errors.Errorf("could not describe broadcast group: %w", err)
+			return nil, nil, errors.Errorf("could not describe broadcast group: %w", err)
 		}
 		for _, resp := range describeResponse.Groups {
 			if resp.GroupID != string(broadcastConsumerGroup) {
-				return nil, errors.Errorf("got a description for a group (%s) that wasn't what was asked for (%s)", resp.GroupID, broadcastConsumerGroup)
+				return nil, nil, errors.Errorf("got a description for a group (%s) that wasn't what was asked for (%s)", resp.GroupID, broadcastConsumerGroup)
 			}
 			switch {
 			case resp.Error == nil:
 				// great!
 			case isTransientCoordinatorError(resp.Error):
 				if !backoff.Continue(b) {
-					return nil, errors.Errorf("could not start broadcast consumer, describe consumer group (%s): %w", broadcastConsumerGroup, resp.Error)
+					return nil, nil, errors.Errorf("could not start broadcast consumer, describe consumer group (%s): %w", broadcastConsumerGroup, resp.Error)
 				}
 				_ = lib.RecordErrorNoWait("timeout-consume-broadcast", errors.Errorf("describe consumer group (%s) failed: %w", broadcastConsumerGroup, resp.Error))
 				// Try again to get a description
 				continue FreshClient
 			default:
-				return nil, errors.WithStack(resp.Error)
+				return nil, nil, errors.WithStack(resp.Error)
 			}
 			if len(resp.Members) == 1 {
 				lib.tracer.Logf("[events] confirmed exactly one member of consumer group %s, using it", broadcastConsumerGroup)
-				return reader, nil
+				return reader, readerConfig, nil
 			}
-			return nil, errGroupUnavailable.Errorf("not exactly one (%d) member of group (%s)", len(resp.Members), broadcastConsumerGroup)
+			return nil, nil, errGroupUnavailable.Errorf("not exactly one (%d) member of group (%s)", len(resp.Members), broadcastConsumerGroup)
 		}
 		if !backoff.Continue(b) {
-			return nil, errors.Errorf("could not start broadcast consumer, describe consumer group (%s) did not include group", broadcastConsumerGroup)
+			return nil, nil, errors.Errorf("could not start broadcast consumer, describe consumer group (%s) did not include group", broadcastConsumerGroup)
 		}
 		_ = lib.RecordErrorNoWait("timeout-consume-broadcast", errors.Errorf("describe consumer group (%s) did not include group", broadcastConsumerGroup))
 		continue
@@ -235,6 +276,7 @@ func (lib *Library[ID, TX, DB]) deleteBroadcastConsumerGroup(ctx context.Context
 			switch {
 			case err == nil, errors.Is(err, kafka.GroupIdNotFound), errors.Is(err, kafka.GroupCoordinatorNotAvailable):
 				// Group was deleted or doesn't exist
+				return nil
 			case errors.Is(err, kafka.NonEmptyGroup):
 				// Sometimes we get a NonEmptyGroup error when a consumer group was
 				// recently used.
@@ -254,6 +296,7 @@ func (lib *Library[ID, TX, DB]) deleteBroadcastConsumerGroup(ctx context.Context
 			}
 		case errors.Is(err, kafka.GroupIdNotFound), errors.Is(err, kafka.GroupCoordinatorNotAvailable):
 			// skip the delete, but we'll have to create the client later
+			return nil
 		case errors.Is(err, kafka.RequestTimedOut):
 			if !backoff.Continue(b) {
 				return errGroupUnavailable.Errorf("could not start broadcast consumer, failed to get coordinator for group (%s): %w", broadcastConsumerGroup, err)
@@ -263,9 +306,7 @@ func (lib *Library[ID, TX, DB]) deleteBroadcastConsumerGroup(ctx context.Context
 		default:
 			return err
 		}
-		break
 	}
-	return nil
 }
 
 // isTransientCoordinatorError is used only in the context of broadcast groups where the group may or

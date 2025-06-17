@@ -313,6 +313,13 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, topics []s
 				}
 				tc.ConfigEntries = setIntConfigValue(tc, "min.insync.replicas", mir)
 			}
+			tsti := generic.FirstMatchIndex(tc.ConfigEntries, func(e kafka.ConfigEntry) bool { return e.ConfigName == "message.timestamp.type" })
+			if tsti < 0 {
+				tc.ConfigEntries = append(tc.ConfigEntries, kafka.ConfigEntry{
+					ConfigName:  "message.timestamp.type",
+					ConfigValue: "LogAppendTime",
+				})
+			}
 
 			mir = getIntConfigValue(tc, "min.insync.replicas")
 			var ctr kafka.CreateTopicsRequest

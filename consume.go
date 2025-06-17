@@ -109,7 +109,7 @@ func (lib *Library[ID, TX, DB]) StartConsuming(ctx context.Context) (started cha
 		}
 	}
 	for consumerGroup, group := range lib.readers {
-		go lib.startConsumingGroup(ctx, consumerGroup, group, limiter, false, &allStarted, &allDone, false)
+		go lib.startConsumingGroup(ctx, consumerGroup, group, limiter, false, &allStarted, &allDone, false, nil, nil, nil)
 	}
 	doneChan := make(chan struct{})
 	startChan := make(chan struct{})
@@ -130,9 +130,15 @@ func (lib *Library[ID, TX, DB]) StartConsuming(ctx context.Context) (started cha
 
 // startConsumingGroup reads messages and calls handlers for a single consumer group
 //
-// consume() exits on idleness because sometimes readers hang. startConsumingGroup
-// calls consume() over and over.
-func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consumerGroup consumerGroupName, group *group, limiter *limit, isBroadcast bool, allStarted *sync.WaitGroup, allDone *sync.WaitGroup, isDeadLetter bool) {
+// consume() exits on idleness because sometimes readers hang. startConsumingGroup calls consume() over and over.
+//
+// Readers get re-created
+func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consumerGroup consumerGroupName, group *group, limiter *limit, isBroadcast bool, allStarted *sync.WaitGroup, allDone *sync.WaitGroup, isDeadLetter bool, reader *kafka.Reader, readerConfig *kafka.ReaderConfig, unlock func() error) {
+	defer func() {
+		if unlock != nil {
+			_ = unlock()
+		}
+	}()
 	if debugConsumeStartup {
 		lib.tracer.Logf("[events] Debug: consume startwait 0 waiting for %s %s", consumerGroup, group.Describe())
 	}
@@ -191,12 +197,51 @@ func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consume
 			}
 		}
 	}
-	var priorSuccess bool
-	for lib.consume(ctx, consumerGroup, group, limiter, isBroadcast, allDone, allStarted, startedSideEffects, &priorSuccess) {
+	var priorSuccess time.Time
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		if reader == nil {
+			if isBroadcast {
+				consumerGroup, reader, readerConfig, err = lib.refreshBroadcastReader(ctx, consumerGroup, &unlock)
+				if err != nil {
+					if ctx.Err() == nil {
+						err = errors.Alertf("cannot refresh broadcast reader: %w", err)
+					}
+					lib.tracer.Logf("[events] FATAL ERROR: %+v", err)
+					return
+				}
+				if !priorSuccess.IsZero() {
+					err := reader.SetOffsetAt(ctx, priorSuccess)
+					if err != nil && ctx.Err() != nil {
+						return
+					}
+					_ = lib.RecordError("reader set offset", errors.Errorf("could not set reader offset for (%s): %w", consumerGroup, err))
+					reader = nil
+					continue
+				}
+			} else {
+				reader, _, readerConfig, err = lib.getReader(ctx, consumerGroup, generic.Keys(group.topics), isBroadcast, false)
+				if err != nil {
+					// the only possible error is timeout with the context cancelled
+					return
+				}
+			}
+		}
+		// set zero counters for metrics
+		startedSideEffects.Do()
+		if isBroadcast && priorSuccess.IsZero() {
+			allStarted.Done()
+		}
+		if !lib.consume(ctx, consumerGroup, group, limiter, isBroadcast, allDone, allStarted, &priorSuccess, reader, readerConfig) {
+			return
+		}
+		reader = nil
 	}
 }
 
-// consume starts one reader and uses it to fetch, process, and acknowledge messages.
+// consume uses one reader and to fetch, process, and acknowledge messages.
 //
 // If message fetching times out, consume exits so that a new reader can be created since
 // it seems that sometimes readers hang.
@@ -211,18 +256,8 @@ func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consume
 //
 // When a handler is done with a message, it writes it to a channel that is read by the processCommits
 // go routine. Messages are explicitly committed in order by partition.
-func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consumerGroupName, group *group, activeLimiter *limit, isBroadcast bool, allDone *sync.WaitGroup, allStarted *sync.WaitGroup, startedSideEffects *once.Once, priorSuccess *bool) bool {
-	// set zero counters for metrics
-	reader, _, readerConfig, err := lib.getReader(ctx, consumerGroup, generic.Keys(group.topics), isBroadcast, !*priorSuccess)
-	if err != nil {
-		// the only possible error is timeout with the context cancelled
-		return false
-	}
-	startedSideEffects.Do()
-	if isBroadcast && !*priorSuccess {
-		allStarted.Done()
-	}
-	*priorSuccess = true
+func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consumerGroupName, group *group, activeLimiter *limit, isBroadcast bool, allDone *sync.WaitGroup, allStarted *sync.WaitGroup, priorSuccess *time.Time, reader *kafka.Reader, readerConfig *kafka.ReaderConfig) bool {
+	*priorSuccess = time.Now()
 	cg := string(consumerGroup)
 	queueLimit := simultaneous.New[eventLimiterType](group.maxQueueLimit()).SetForeverMessaging(
 		limiterStuckMessageAfter,
