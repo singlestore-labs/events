@@ -101,7 +101,7 @@ func BroadcastDeliveryTest[
 	WaitFor(ctx, t, "consumer1", started1, StartupTimeout)
 	WaitFor(ctx, t, "consumer2", started2, StartupTimeout)
 
-	t.Log("Verify broadcast consumer groups are different: %s vs %s", lib1.GetBroadcastConsumerGroupName(), lib2.GetBroadcastConsumerGroupName())
+	t.Logf("Verify broadcast consumer groups are different: %s vs %s", lib1.GetBroadcastConsumerGroupName(), lib2.GetBroadcastConsumerGroupName())
 	require.NotEqual(t, lib1.GetBroadcastConsumerGroupName(), lib2.GetBroadcastConsumerGroupName(), "broadcast consumer group names")
 
 	// Clean up when done

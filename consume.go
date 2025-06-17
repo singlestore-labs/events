@@ -156,20 +156,10 @@ func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consume
 		}
 		allDone.Done()
 	}()
-	for {
-		topics := generic.Keys(group.topics)
-		if debugConsumeStartup {
-			lib.tracer.Logf("[events] Debug: pre-creating topics: %v", topics)
-		}
-		err := lib.precreateTopicsForConsuming(ctx, consumerGroup, topics)
-		if err != nil {
-			_ = lib.RecordError("preCreateTopicsForConsume", err)
-			continue
-		}
-		if debugConsumeStartup {
-			lib.tracer.Logf("[events] Debug: topics pre-created")
-		}
-		break
+	// precreateTopicsForConsuming keeps trying until it succeeds or the context is cancelled.
+	err := lib.precreateTopicsForConsuming(ctx, consumerGroup, generic.Keys(group.topics))
+	if err != nil {
+		return
 	}
 	for _, topicHandler := range group.topics {
 		for name, handler := range topicHandler.handlers {
@@ -223,28 +213,17 @@ func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consume
 // go routine. Messages are explicitly committed in order by partition.
 func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consumerGroupName, group *group, activeLimiter *limit, isBroadcast bool, allDone *sync.WaitGroup, allStarted *sync.WaitGroup, startedSideEffects *once.Once, priorSuccess *bool) bool {
 	// set zero counters for metrics
-	readerConfig := kafka.ReaderConfig{
-		Brokers:     lib.brokers,
-		GroupID:     consumerGroup.String(),
-		GroupTopics: generic.Keys(group.topics),
-		MaxBytes:    maxBytes,
-		Dialer:      lib.dialer(),
-		StartOffset: kafka.FirstOffset,
+	reader, _, readerConfig, err := lib.getReader(ctx, consumerGroup, generic.Keys(group.topics), isBroadcast, !*priorSuccess)
+	if err != nil {
+		// the only possible error is timeout with the context cancelled
+		return false
 	}
+	startedSideEffects.Do()
+	if isBroadcast && !*priorSuccess {
+		allStarted.Done()
+	}
+	*priorSuccess = true
 	cg := string(consumerGroup)
-	if isBroadcast {
-		cg = "broadcast"
-		if !*priorSuccess {
-			if debugConsumeStartup {
-				lib.tracer.Logf("[events] Debug: consume %s setting start offset = last offset", consumerGroup)
-			}
-			readerConfig.StartOffset = kafka.LastOffset
-		}
-		if _, ok := group.topics[heartbeatTopic.Topic()]; !ok {
-			// we don't actually need a handler, just need to subscribe to the topic
-			readerConfig.GroupTopics = append(readerConfig.GroupTopics, heartbeatTopic.Topic())
-		}
-	}
 	queueLimit := simultaneous.New[eventLimiterType](group.maxQueueLimit()).SetForeverMessaging(
 		limiterStuckMessageAfter,
 		func() {
@@ -261,7 +240,6 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 	if debugConsumeStartup {
 		lib.tracer.Logf("[events] Debug: consume %s readerconfig topics %v", consumerGroup, readerConfig.GroupTopics)
 	}
-	reader := kafka.NewReader(readerConfig)
 	defer func() {
 		// outstandingWork.Wait() must precede commitsCancel. CommitsCancel stops
 		// the processCommits task, but only once it has completed all pending work.
@@ -277,7 +255,6 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 	}()
 
 	lib.tracer.Logf("[events] consumer started for consumerGroup %s for %s", consumerGroup, group.Describe())
-	startedSideEffects.Do()
 	sequenceNumbers := make(map[int]int)
 	// done is used to commit offsets for messages that have been processed
 	done := make(chan *messageAndSequenceNumber, commitQueueDepth)
@@ -323,17 +300,10 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 			shortCancel()
 			return true
 		}
-		if !*priorSuccess {
-			*priorSuccess = true
-			if isBroadcast {
-				allStarted.Done()
-			}
-		}
 		if debugConsume {
 			lib.tracer.Logf("[events] Debug: received one %s message in consumer group %s: %s", msg.Topic, consumerGroup, string(msg.Key))
 		}
 		shortCancel()
-		startedSideEffects.Do()
 		if isBroadcast {
 			func() {
 				lib.lastBroadcastLock.Lock()
