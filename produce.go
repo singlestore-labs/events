@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -86,8 +87,97 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 	}
 	err = lib.writer.WriteMessages(ctx, messages...)
 	if err != nil {
+		if errors.Is(err, kafka.UnknownTopicOrPartition) {
+			lib.tracer.Logf("[events] got an unknown topic or partition error when writing %d message(s) that have known good topics. Retrying with transactional fallback...", len(messages))
+			return lib.transactionalFallbackWrite(ctx, messages)
+		}
 		return lib.RecordErrorNoWait("produceEvents", errors.Errorf("cannot produce messages (%d, example topic %s) to Kafka: %w", len(messages), messages[0].Topic, err))
 	}
+	return nil
+}
+
+// transactionalFallbackWrite attempts transactional writes across brokers when the main code gets an unknown topic/partition error
+// It's possible that WriteMessages (above) may have had a partial success. So that we don't end up
+// with lots of duplicates, when do our redo attempts, we'll do so inside a Kafka transaction so that
+// there is at most one duplicate of each message.
+func (lib *Library[ID, TX, DB]) transactionalFallbackWrite(ctx context.Context, messages []kafka.Message) error {
+	if len(lib.brokers) == 0 {
+		return errors.Errorf("no brokers available for transactional fallback")
+	}
+
+	// Group messages by topic for logging
+	topicSet := make(map[string]struct{})
+	for _, msg := range messages {
+		topicSet[msg.Topic] = struct{}{}
+	}
+	topics := make([]string, 0, len(topicSet))
+	for topic := range topicSet {
+		topics = append(topics, topic)
+	}
+
+	lib.tracer.Logf("[events] attempting transactional fallback for %d messages across topics %v", len(messages), topics)
+
+	// Try each broker in sequence
+	for i, broker := range lib.brokers {
+		lib.tracer.Logf("[events] trying transactional write to broker %d/%d: %s", i+1, len(lib.brokers), broker)
+
+		err := lib.tryTransactionalWriteWithBroker(ctx, broker, messages)
+		if err == nil {
+			lib.tracer.Logf("[events] transactional fallback completed successfully with broker %s", broker)
+			return nil
+		}
+
+		lib.tracer.Logf("[events] transactional write failed with broker %s: %v", broker, err)
+
+		// Continue to next broker unless this is the last one
+		if i < len(lib.brokers)-1 {
+			continue
+		}
+	}
+
+	lib.tracer.Logf("[events] transactional fallback failed on all %d brokers", len(lib.brokers))
+	return errors.Errorf("transactional fallback failed on all %d brokers", len(lib.brokers))
+}
+
+// tryTransactionalWriteWithBroker attempts a transactional write with a specific broker
+func (lib *Library[ID, TX, DB]) tryTransactionalWriteWithBroker(ctx context.Context, broker string, messages []kafka.Message) error {
+	// Create unique transaction ID for this attempt
+	txID := fmt.Sprintf("fallback-tx-%d-%d", os.Getpid(), time.Now().UnixNano())
+
+	lib.tracer.Logf("[events] creating transactional writer for broker %s with transaction ID %s", broker, txID)
+
+	// Create a transactional writer for this specific broker
+	writer := &kafka.Writer{
+		Addr:         kafka.TCP(broker),
+		Transport:    lib.transport(),
+		RequiredAcks: kafka.RequireAll,
+		BatchTimeout: transactionalBatchTimeout,
+		WriteTimeout: transactionalWriteTimeout,
+		ReadTimeout:  transactionalReadTimeout,
+	}
+
+	// Create context with timeout for the entire operation
+	ctx, cancel := context.WithTimeout(ctx, transactionalOperationTimeout)
+	defer cancel()
+
+	lib.tracer.Logf("[events] writing %d messages transactionally to broker %s", len(messages), broker)
+
+	// Write messages - the writer handles the transaction lifecycle
+	err := writer.WriteMessages(ctx, messages...)
+	if err != nil {
+		// Close writer to clean up any state
+		_ = writer.Close()
+		return errors.Errorf("failed to write messages to broker %s: %w", broker, err)
+	}
+
+	// Close writer
+	err = writer.Close()
+	if err != nil {
+		return errors.Errorf("failed to close writer for broker %s: %w", broker, err)
+	}
+
+	lib.tracer.Logf("[events] successfully wrote %d fallback transactional messages to broker %s", len(messages), broker)
+
 	return nil
 }
 
@@ -138,7 +228,7 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventsByTo
 	if lib.lazyProduce {
 		return nil
 	}
-	if lib.db == nil {
+	if !lib.HasDB() {
 		return errors.Errorf("cannot produce from table with nil db")
 	}
 	if debugProduce {
@@ -163,7 +253,7 @@ func (lib *Library[ID, TX, DB]) CatchUpProduce(ctx context.Context, sleepTime ti
 		close(done)
 		return done, err
 	}
-	if lib.db == nil {
+	if !lib.HasDB() {
 		close(done)
 		return done, errors.Alertf("attempt to produce dropped events in library that does not embed a database")
 	}

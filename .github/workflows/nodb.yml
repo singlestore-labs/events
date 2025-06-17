@@ -1,0 +1,111 @@
+name: NoDB tests
+on: [push]
+
+permissions:  # added using https://github.com/step-security/secure-workflows
+  contents: read
+
+jobs:
+  Test-no-database-integration:
+    runs-on: ubuntu-latest
+
+    services:
+      kafka:
+        image: bitnami/kafka:3.6.2
+        env:
+          KAFKA_BROKER_ID: 1
+          KAFKA_CFG_NODE_ID: 1
+          KAFKA_CFG_PROCESS_ROLES: controller,broker
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: false
+          KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+          KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+        ports:
+          - 9092:9092
+          - 9093:9093
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@0634a2670c59f64b4a01f0f96f84700a4088b9f0
+        with:
+          egress-policy: audit
+          allowed-endpoints: >
+            api.github.com:443
+            codecov.io:443
+            github.com:443
+            go.dev:443
+            golang.org:443
+            proxy.golang.org:443
+            storage.googleapis.com:443
+            uploader.codecov.io:443
+
+      - name: Check out repository code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Get Go cache paths
+        id: go-cache-paths
+        run: |
+          echo "go-build=$(go env GOCACHE)" >> $GITHUB_OUTPUT
+          echo "go-mod=$(go env GOMODCACHE)" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Go Build Cache
+        id: events-build
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.go-cache-paths.outputs.go-build }}
+          key: ${{ runner.os }}.go-build-${{ hashFiles('**/go.sum') }}-1.22.x
+     
+      - name: Go Mod Cache
+        id: events-mod
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.go-cache-paths.outputs.go-mod }}
+          key: ${{ runner.os }}.go-build-${{ hashFiles('**/go.sum') }}-1.22.x
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.22'
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test and Coverage
+        env:
+          EVENTS_POSTGRES_TEST_DSN: "postgres://postgres:postgres@localhost?sslmode=disable"
+          EVENTS_KAFKA_BROKERS: "localhost:9092"
+        run: |
+          export EVENTS_DEBUG_NOTIFY="true"
+          export EVENTS_DEBUG_PRODUCE="true"
+          export EVENTS_DEBUG_DELIVERY="true"
+          export EVENTS_DEBUG_ACK="true"
+          export EVENTS_DEBUG_CONSUME="true"
+          export EVENTS_DEBUG_START_CONSUME="true"
+          export EVENTS_DEBUG_BATCHING="true"
+          go test -coverprofile=coverage2.txt -covermode=atomic -coverpkg=github.com/singlestore-labs/events/... -v . ./eventnodb/...  
+          export EVENTS_DEBUG_NOTIFY="false"
+          export EVENTS_DEBUG_PRODUCE="false"
+          export EVENTS_DEBUG_DELIVERY="false"
+          export EVENTS_DEBUG_ACK="false"
+          export EVENTS_DEBUG_CONSUME="false"
+          export EVENTS_DEBUG_START_CONSUME="false"
+          export EVENTS_DEBUG_BATCHING="false"
+          go test -coverprofile=coverage1.txt -covermode=atomic -coverpkg=github.com/singlestore-labs/events/... . ./eventnodb/... 
+          cat coverage1.txt coverage2.txt > coverage.txt
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          verbose: true
+          fail_ci_if_error: true
+          flags: nodb_tests
+          name: nodb_tests
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

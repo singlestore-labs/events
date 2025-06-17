@@ -28,6 +28,9 @@ func ErrorWhenMisusedTest[
 	brokers Brokers,
 	cancel Cancel,
 ) {
+	if IsNilDB(conn) {
+		t.Skipf("%s requires a database", t.Name())
+	}
 	type myEvent map[string]string
 
 	lib := events.New[ID, TX, DB]()

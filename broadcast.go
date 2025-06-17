@@ -74,7 +74,7 @@ func (lib *Library[ID, TX, DB]) getBroadcastConsumerGroup(ctx context.Context, w
 			_ = unlock()
 			unlock = nil
 		}
-		if lib.db != nil && !lib.broadcastConsumerSkipLock {
+		if lib.HasDB() && !lib.broadcastConsumerSkipLock {
 			var err error
 			// We do not unlock on success -- the lock is held until the context is cancelled
 			unlock, err = lib.db.LockOrError(ctx, potentialLock, 0)
@@ -95,8 +95,8 @@ func (lib *Library[ID, TX, DB]) getBroadcastConsumerGroup(ctx context.Context, w
 				continue
 			}
 		}
-		if broadcastConsumerBaseName == "" {
-			if lib.db == nil || lib.broadcastConsumerSkipLock {
+		if lib.broadcastConsumerBaseName == "" {
+			if !lib.HasDB() || lib.broadcastConsumerSkipLock {
 				broadcastConsumerBaseName = defaultLockFreeBroadcastBase
 			} else {
 				broadcastConsumerBaseName = defaultBroadcastConsumerBaseName

@@ -96,6 +96,9 @@ func OrderedTest[
 	prefix string,
 	oneConsumerGroup bool,
 ) {
+	if IsNilDB(conn) {
+		t.Skipf("%s requires a database", t.Name())
+	}
 	type myType map[string]string
 
 	baseT := t

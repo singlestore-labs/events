@@ -17,10 +17,11 @@ import (
 	"github.com/muir/gwrap"
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl"
-
-	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/singlestore-labs/generic"
 	"github.com/singlestore-labs/simultaneous"
+
+	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/events/internal"
 )
 
 var _ eventmodels.Producer[eventmodels.StringEventID, eventmodels.AbstractTX] = &Library[eventmodels.StringEventID, eventmodels.AbstractTX, eventmodels.AbstractDB[eventmodels.StringEventID, eventmodels.AbstractTX]]{}
@@ -47,6 +48,10 @@ const (
 	readerStartupReport                 = time.Minute
 	defaultBroadcastConsumerBaseName    = "broadcastConsumer"
 	defaultLockFreeBroadcastBase        = "broadcastLFConsumer"
+	transactionalWriteTimeout           = 30 * time.Second
+	transactionalReadTimeout            = 30 * time.Second
+	transactionalBatchTimeout           = 100 * time.Millisecond
+	transactionalOperationTimeout       = 45 * time.Second
 
 	// maximumParallelConsumption limits the number of handlers that can run at once.
 	// The larger this number, the more memory and CPU devoted to event processing. The
@@ -86,6 +91,7 @@ type Library[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventm
 }
 
 type LibraryNoDB struct {
+	hasDB                     atomic.Bool
 	tracer                    eventmodels.Tracer
 	brokers                   []string
 	writer                    *kafka.Writer
@@ -286,18 +292,17 @@ func (lib *Library[ID, TX, DB]) SetLazyTxProduce(lazy bool) {
 //
 // The conn parameter may be nil, in which case CatchUpProduce() and ProduceFromTable() will error.
 func (lib *Library[ID, TX, DB]) Configure(conn DB, tracer eventmodels.Tracer, mustRegisterTopics bool, saslMechanism sasl.Mechanism, tlsConfig *TLSConfig, brokers []string) {
-	if any(conn) != nil {
-		processRegistrationTodo(lib) // before taking lock to avoid deadlock
-	}
+	processRegistrationTodo(lib) // before taking lock to avoid deadlock
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
 	lib.mustNotBeRunning("attempt configure event library that is already processing")
 	lib.ready.Store(isConfigured)
-	if any(conn) != nil {
+	if !internal.IsNil(conn) {
+		lib.db = conn
+		lib.hasDB.Store(true)
 		if augmenter, ok := any(conn).(eventmodels.CanAugment[ID, TX]); ok && lib.doEnhance {
 			augmenter.AugmentWithProducer(lib)
 		}
-		lib.db = conn
 	}
 	lib.brokers = brokers
 	if saslMechanism != nil {
@@ -701,6 +706,10 @@ func (lib *Library[ID, TX, DB]) mustNotBeRunning(message string) {
 
 func (lib *Library[ID, TX, DB]) InstanceID() int32 {
 	return lib.instanceID
+}
+
+func (lib *Library[ID, TX, DB]) HasDB() bool {
+	return lib.hasDB.Load()
 }
 
 type consumerGroupName string

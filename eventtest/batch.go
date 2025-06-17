@@ -79,14 +79,6 @@ func runTest[ID eventmodels.AbstractID[ID], TX eventmodels.EnhancedTX, DB Augmen
 ) {
 	defer cancel()
 
-	produceDone, err := lib.CatchUpProduce(ctx, time.Second*5, 64)
-	defer func() {
-		cancel()
-		t.Log("wait for produce done")
-		<-produceDone
-	}()
-	require.NoError(t, err, "catch up")
-
 	consumeDone := lib.StartConsumingOrPanic(ctx)
 	defer func() {
 		cancel()
@@ -148,7 +140,9 @@ func batchTestCommon[
 
 	consumerGroup := events.NewConsumerGroup(Name(t) + "Topic")
 	lib := events.New[ID, TX, DB]()
-	conn.AugmentWithProducer(lib)
+	if !IsNilDB(conn) {
+		conn.AugmentWithProducer(lib)
+	}
 	topic := eventmodels.BindTopicTx[map[string]string, ID, TX, DB](Name(t) + "Topic")
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
 
@@ -217,6 +211,9 @@ func BatchDeliveryExactlyOnceTest[
 	brokers Brokers,
 	cancel Cancel,
 ) {
+	if IsNilDB(conn) {
+		t.Skipf("%s requires a database", t.Name())
+	}
 	lib, topic, consumerGroup, events := batchTestCommon(ctx, t, conn, brokers, "BDEO")
 
 	info, handler := createHandler[ID, TX, DB](t, "exactlyOnce")
