@@ -22,7 +22,7 @@ import (
 
 /*
 
-Set up to run tests with PostgreSQL
+Set up to run tests with PostgreSQL. You also need Kafka, see eventnodb tests.
 
 export PGPASSWORD=postgres
 docker run --name postgres -p 5432:5432 -e POSTGRES_PASSWORD="$PGPASSWORD" --restart=always -d postgres:latest

@@ -34,6 +34,8 @@ import (
 
  Set up to run tests...
 
+ You also need Kafka. See the eventnodb tests
+
  EVENTS_S2PASSWORD="chooseSomething"
 
  docker run \
