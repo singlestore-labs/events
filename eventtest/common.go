@@ -14,7 +14,10 @@ import (
 
 	"github.com/singlestore-labs/events"
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/events/internal"
 )
+
+// --------- begin section that is duplicated in consumer_group_test.go -----------
 
 type T = ntest.T
 
@@ -57,6 +60,8 @@ func AutoCancel(ctx context.Context, t T) (context.Context, Cancel) {
 	return ctx, onlyOnce.Do
 }
 
+// --------- end section that is duplicated in consumer_group_test.go -----------
+
 type AugmentAbstractDB[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX] interface {
 	eventmodels.AbstractDB[ID, TX]
 	eventmodels.CanAugment[ID, TX]
@@ -75,6 +80,10 @@ var (
 	DeliveryTimeout = LongerOnCI(20*time.Second, 10*time.Minute, 2*time.Minute)
 	StartupTimeout  = LongerOnCI(65*time.Second, 5*time.Minute, 65*time.Second)
 )
+
+func IsNilDB[DB any](db DB) bool {
+	return internal.IsNil(db)
+}
 
 func LongerOnCI(local, gitlab, github time.Duration) time.Duration {
 	switch {

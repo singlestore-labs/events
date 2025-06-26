@@ -70,7 +70,7 @@ func (lib *Library[ID, TX, DB]) StartConsuming(ctx context.Context) (started cha
 	if err != nil {
 		return nil, nil, err
 	}
-	if lib.hasTxConsumers && lib.db == nil {
+	if lib.hasTxConsumers && !lib.HasDB() {
 		return nil, nil, errors.Alertf("attempt to consume exactly-once in an event library w/o a database connection")
 	}
 	limiter := simultaneous.New[eventLimiterType](maximumParallelConsumption).SetForeverMessaging(

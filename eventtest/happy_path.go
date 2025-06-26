@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,7 +46,9 @@ func BroadcastDeliveryTest[
 
 	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, "TBDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TBDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	conn.AugmentWithProducer(lib1)
+	if !IsNilDB(conn) {
+		conn.AugmentWithProducer(lib1)
+	}
 
 	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t) + "Topic")
 	lib1.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
@@ -90,8 +93,6 @@ func BroadcastDeliveryTest[
 	lib2.ConsumeBroadcast("B3", topic.Handler(mkBroadcastHandler("B3")))
 
 	t.Log("Start consumers and producers")
-	produceDone, err := lib1.CatchUpProduce(ctx, time.Second*5, 64)
-	require.NoError(t, err, "start catch up")
 
 	started1, done1, err := lib1.StartConsuming(ctx)
 	require.NoError(t, err, "start consuming lib1")
@@ -104,6 +105,12 @@ func BroadcastDeliveryTest[
 	t.Logf("Verify broadcast consumer groups are different: %s vs %s", lib1.GetBroadcastConsumerGroupName(), lib2.GetBroadcastConsumerGroupName())
 	require.NotEqual(t, lib1.GetBroadcastConsumerGroupName(), lib2.GetBroadcastConsumerGroupName(), "broadcast consumer group names")
 
+	if IsNilDB(conn) {
+		assert.True(t, strings.HasPrefix(lib1.GetBroadcastConsumerGroupName(), "broadcastLFConsumer-"), "consumer prefix") // defaultLockFreeBroadcastBase
+	} else {
+		assert.True(t, strings.HasPrefix(lib1.GetBroadcastConsumerGroupName(), "broadcastConsumer-"), "consumer prefix") // defaultBroadcastConsumerBaseName
+	}
+
 	// Clean up when done
 	defer func() {
 		t.Log("cancel")
@@ -112,22 +119,17 @@ func BroadcastDeliveryTest[
 		<-done1
 		t.Log("wait done2")
 		<-done2
-		t.Log("wait produce")
-		<-produceDone
 		t.Log("done waits")
 	}()
 
 	t.Log("Send test message")
-	require.NoErrorf(t, conn.Transact(ctx, func(tx TX) error {
-		tx.Produce(topic.Event("key-"+id, MyEvent{
-			S: "broadcast-test",
-		}).
-			ID(id).
-			Subject(Name(t) + "-subject").
-			Time(now))
-		t.Logf("added event to transaction")
-		return nil
-	}), "transact/send")
+	require.NoError(t, lib1.Produce(ctx, eventmodels.ProduceImmediate, topic.Event("key-"+id, MyEvent{
+		S: "broadcast-test",
+	}).
+		ID(id).
+		Subject(Name(t)+"-subject").
+		Time(now)))
+
 	t.Logf("transaction complete, message sent")
 
 	t.Log("Wait for handlers to be called")
@@ -202,7 +204,9 @@ func IdempotentDeliveryTest[
 
 	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, "TIDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TIDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	conn.AugmentWithProducer(lib1)
+	if !IsNilDB(conn) {
+		conn.AugmentWithProducer(lib1)
+	}
 
 	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t) + "Topic")
 	lib1.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
@@ -252,8 +256,6 @@ func IdempotentDeliveryTest[
 	lib2.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentC"), eventmodels.OnFailureBlock, "Ic1", topic.Handler(mkIdempotentHandler("Ic1")))
 
 	t.Log("Start consumers and producers")
-	produceDone, err := lib1.CatchUpProduce(ctx, time.Second*5, 64)
-	require.NoError(t, err, "start catch up")
 
 	started1, done1, err := lib1.StartConsuming(ctx)
 	require.NoError(t, err, "start consuming lib1")
@@ -271,22 +273,17 @@ func IdempotentDeliveryTest[
 		<-done1
 		t.Log("wait done2")
 		<-done2
-		t.Log("wait produce")
-		<-produceDone
 		t.Log("done waits")
 	}()
 
 	t.Log("Send test message")
-	require.NoErrorf(t, conn.Transact(ctx, func(tx TX) error {
-		tx.Produce(topic.Event("key-"+id, MyEvent{
-			S: "idempotent-test",
-		}).
-			ID(id).
-			Subject(Name(t) + "-subject").
-			Time(now))
-		t.Logf("added event to transaction")
-		return nil
-	}), "transact/send")
+	require.NoError(t, lib1.Produce(ctx, eventmodels.ProduceImmediate, topic.Event("key-"+id, MyEvent{
+		S: "idempotent-test",
+	}).
+		ID(id).
+		Subject(Name(t)+"-subject").
+		Time(now)))
+
 	t.Logf("transaction complete, message sent")
 
 	t.Log("Wait for message delivery")
@@ -356,6 +353,10 @@ func ExactlyOnceDeliveryTest[
 	brokers Brokers,
 	cancel Cancel,
 ) {
+	if IsNilDB(conn) {
+		t.Skipf("%s requires a database", t.Name())
+	}
+
 	baseT := t
 	t = ntest.ExtraDetailLogger(t, "TEOD")
 
@@ -530,8 +531,6 @@ func CloudEventEncodingTest[
 		}))
 
 	lib.Configure(conn, t, false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	produceDone, err := lib.CatchUpProduce(ctx, time.Second*5, 64)
-	require.NoError(t, err, "start catch up")
 	done := lib.StartConsumingOrPanic(ctx)
 
 	defer func() {
@@ -539,8 +538,6 @@ func CloudEventEncodingTest[
 		cancel()
 		t.Log("wait done")
 		<-done
-		t.Log("wait produce")
-		<-produceDone
 		t.Log("done waiting")
 	}()
 
@@ -555,15 +552,11 @@ func CloudEventEncodingTest[
 	now := time.Now()
 
 	id1 := uuid.New().String()
-	t.Logf("message 1 %s is sent the normal way with a transaction", id1)
-	require.NoErrorf(t, conn.Transact(ctx, func(tx TX) error {
-		tx.Produce(topic.Event(id1, body).
-			ID(id1).
-			Time(now),
-		)
-		t.Logf("added events to transaction")
-		return nil
-	}), "transact/send")
+	t.Logf("message 1 %s is sent the normal way", id1)
+	require.NoError(t, lib.Produce(ctx, eventmodels.ProduceImmediate, topic.Event(id1, body).
+		ID(id1).
+		Time(now)))
+
 	t.Logf("msg1 (%s) sent", id1)
 
 	id2 := uuid.New().String()

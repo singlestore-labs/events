@@ -106,7 +106,9 @@ func DeadLetterTest[
 	type myType map[string]string
 
 	lib := events.New[ID, TX, DB]()
-	conn.AugmentWithProducer(lib)
+	if !IsNilDB(conn) {
+		conn.AugmentWithProducer(lib)
+	}
 	topic := eventmodels.BindTopic[myType](Name(t) + "Topic")
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
 	deadLetterTopic := eventmodels.BindTopic[myType](events.DeadLetterTopic(Name(t)+"Topic", consumerGroup))
@@ -141,23 +143,13 @@ func DeadLetterTest[
 
 	firstCtx, cancelFirst := context.WithCancel(ctx)
 	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, prefix+"1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	produceDone, err := lib.CatchUpProduce(ctx, time.Second*5, 64)
-	defer func() {
-		t.Log("wait for produce done")
-		<-produceDone
-	}()
-	require.NoError(t, err, "catch up")
 	firstDone := lib.StartConsumingOrPanic(firstCtx)
 
 	body := myType{
 		Name(t): "value",
 	}
 	t.Logf("message 1 %s", id1)
-	require.NoErrorf(t, conn.Transact(ctx, func(tx TX) error {
-		tx.Produce(topic.Event(id1, body).ID(id1))
-		t.Logf("added events to transaction")
-		return nil
-	}), "transact/send")
+	require.NoError(t, lib.Produce(ctx, eventmodels.ProduceImmediate, topic.Event(id1, body).ID(id1)))
 
 	WaitFor(ctx, t, "first delivery", firstSignal, DeliveryTimeout)
 	t.Log("sleeping...")
