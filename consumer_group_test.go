@@ -108,7 +108,7 @@ func TestBroadcastGroupRefresh(t *testing.T) {
 	if os.Getenv("EVENTS_KAFKA_BROKERS") == "" {
 		t.Skipf("%s requires kafka brokers", t.Name())
 	}
-	ntest.RunTest(t,
+	ntest.RunTest(ntest.BufferedLogger(t),
 		CommonInjectors,
 		nject.Provide("nodb", func() *NoDB {
 			return nil // Pass nil connection to trigger no-database behavior

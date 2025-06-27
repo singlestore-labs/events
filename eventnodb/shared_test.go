@@ -52,7 +52,7 @@ func TestSharedEventNoDB(t *testing.T) {
 	if os.Getenv("EVENTS_KAFKA_BROKERS") == "" {
 		t.Skipf("%s requires kafka brokers", t.Name())
 	}
-	ntest.RunParallelMatrix(t,
+	ntest.RunParallelMatrix(ntest.BufferedLogger(t),
 		chain,
 		eventtest.GenerateSharedTestMatrix[eventmodels.BinaryEventID, *eventnodb.NoDBTx, *eventnodb.NoDB](),
 	)

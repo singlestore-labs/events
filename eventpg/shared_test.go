@@ -83,7 +83,7 @@ func pgconn(db *sql.DB) *DBType {
 type LibraryType = events.Library[eventmodels.StringEventID, *eventdb.ExampleBasicTX, *eventpg.Connection[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB]]
 
 func TestSharedEventPG(t *testing.T) {
-	ntest.RunParallelMatrix(t,
+	ntest.RunParallelMatrix(ntest.BufferedLogger(t),
 		chain,
 		eventtest.GenerateSharedTestMatrix[eventmodels.StringEventID, *eventdb.ExampleBasicTX, *eventpg.Connection[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB]](),
 	)
