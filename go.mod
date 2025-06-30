@@ -11,7 +11,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/memsql/errors v0.2.0
 	github.com/memsql/keyeddistributor v0.1.0
-	github.com/memsql/ntest v0.7.0
+	github.com/memsql/ntest v0.8.0
 	github.com/muir/gwrap v0.4.0
 	github.com/muir/libschema v0.6.1
 	github.com/muir/nject/v2 v2.1.0
