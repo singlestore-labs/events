@@ -57,7 +57,7 @@ conn := eventpg.New[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB](eventdb.Exa
 	DB: db,
 })
 
-// SingleSTore:
+// SingleStore:
 eventLib := events.New[eventmodels.BinaryEventID, *eventdb.ExampleBasicTX, *events2.Connection[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB]]()
 conn := events2.New[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB](eventdb.ExampleBasicDB{
 	DB: db,

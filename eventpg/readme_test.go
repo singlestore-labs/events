@@ -17,14 +17,14 @@ func TestReadmeCompiles(t *testing.T) {
 	t.Log("This validates the example in the readme compiles, update this test if you change the readme and vice versa")
 	dsn := os.Getenv("EVENTS_POSTGRES_TEST_DSN")
 	if dsn == "" {
-		t.Skip("must set EVENTS_S2TEST_DSN to run this test, it compiles, so that's probably enough")
+		t.Skip("must set EVENTS_POSTGRES_TEST_DSN to run this test, it compiles, so that's probably enough")
 	}
 	brokers := strings.Split(os.Getenv("EVENTS_KAFKA_BROKERS"), " ")
 	if len(brokers) == 0 {
 		t.Skip("EVENTS_KAFKA_BROKERS must be set to run this test")
 	}
 
-	db, err := sql.Open("mysql", dsn)
+	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
 	defer func() {
 		_ = db.Close()
