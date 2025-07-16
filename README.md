@@ -49,7 +49,23 @@ to use (idempotent, exactly-once, or broadcast).
 In `init()` or in `main()`, create an instance:
 
 ```go
-eventLib := events.New()
+db, _  := sql.Open(...)
+
+// PostgreSQL:
+eventLib := events.New[eventmodels.StringEventID, *eventdb.ExampleBasicTX, *eventpg.Connection[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB]]() 
+conn := eventpg.New[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB](eventdb.ExampleBasicDB{
+	DB: db,
+})
+
+// SingleSTore:
+eventLib := events.New[eventmodels.BinaryEventID, *eventdb.ExampleBasicTX, *events2.Connection[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB]]()
+conn := events2.New[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB](eventdb.ExampleBasicDB{
+	DB: db,
+}, "lockPrefix")
+
+// No database
+eventLib := events.New[eventmodels.BinaryEventID, *eventnodb.NoDBTx, *eventnodb.NoDB]()
+var conn *eventnodb.NoDB
 ```
 
 That instance needs to be configured. It can be configured before or after
