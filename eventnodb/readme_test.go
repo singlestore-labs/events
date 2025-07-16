@@ -11,7 +11,7 @@ import (
 )
 
 func TestReadmeCompiles(t *testing.T) {
-	t.Log("This validates the example in the readme compiles, update this test if you change the readme")
+	t.Log("This validates the example in the readme compiles, update this test if you change the readme and vice versa")
 	brokers := strings.Split(os.Getenv("EVENTS_KAFKA_BROKERS"), " ")
 	if len(brokers) == 0 || brokers[0] == "" {
 		t.Skip("EVENTS_KAFKA_BROKERS must be set to run this test")
