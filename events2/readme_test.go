@@ -20,7 +20,7 @@ func TestReadmeCompiles(t *testing.T) {
 		t.Skip("must set EVENTS_S2TEST_DSN to run this test, it compiles, so that's probably enough")
 	}
 	brokers := strings.Split(os.Getenv("EVENTS_KAFKA_BROKERS"), " ")
-	if len(brokers) == 0 {
+	if len(brokers) == 0 || brokers[0] == "" {
 		t.Skip("EVENTS_KAFKA_BROKERS must be set to run this test")
 	}
 

@@ -25,7 +25,7 @@ type Brokers []string
 
 func KafkaBrokers(t T) Brokers {
 	brokers := strings.Split(os.Getenv("EVENTS_KAFKA_BROKERS"), " ")
-	if len(brokers) == 0 {
+	if len(brokers) == 0 || brokers[0] == "" {
 		t.Skip("EVENTS_KAFKA_BROKERS must be set to run this test")
 	}
 	return Brokers(brokers)
