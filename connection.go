@@ -335,7 +335,7 @@ func (lib *Library[ID, TX, DB]) start(str string, args ...any) error {
 		Dialer:  lib.dialer(),
 	})
 	lib.ready.Store(isRunning)
-	if len(lib.brokers) == 0 {
+	if len(lib.brokers) == 0 || lib.brokers[0] == "" {
 		return errors.Errorf("no brokers configured")
 	}
 	return nil

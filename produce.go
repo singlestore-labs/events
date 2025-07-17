@@ -101,7 +101,7 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 // with lots of duplicates, when do our redo attempts, we'll do so inside a Kafka transaction so that
 // there is at most one duplicate of each message.
 func (lib *Library[ID, TX, DB]) transactionalFallbackWrite(ctx context.Context, messages []kafka.Message) error {
-	if len(lib.brokers) == 0 {
+	if len(lib.brokers) == 0 || lib.brokers[0] == "" {
 		return errors.Errorf("no brokers available for transactional fallback")
 	}
 
