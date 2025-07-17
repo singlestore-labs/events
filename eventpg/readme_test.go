@@ -3,13 +3,13 @@ package eventpg_test
 import (
 	"database/sql"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/singlestore-labs/events"
 	"github.com/singlestore-labs/events/eventdb"
 	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/singlestore-labs/events/eventpg"
+	"github.com/singlestore-labs/events/eventtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,10 +19,7 @@ func TestReadmeCompiles(t *testing.T) {
 	if dsn == "" {
 		t.Skip("must set EVENTS_POSTGRES_TEST_DSN to run this test, it compiles, so that's probably enough")
 	}
-	brokers := strings.Split(os.Getenv("EVENTS_KAFKA_BROKERS"), " ")
-	if len(brokers) == 0 || brokers[0] == "" {
-		t.Skip("EVENTS_KAFKA_BROKERS must be set to run this test")
-	}
+	brokers := []string(eventtest.KafkaBrokers(t))
 
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
