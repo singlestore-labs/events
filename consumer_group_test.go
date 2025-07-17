@@ -27,11 +27,11 @@ type T = ntest.T
 type Brokers []string
 
 func KafkaBrokers(t T) Brokers {
-	brokers := strings.Split(os.Getenv("EVENTS_KAFKA_BROKERS"), " ")
-	if len(brokers) == 0 {
+	brokers := os.Getenv("EVENTS_KAFKA_BROKERS")
+	if brokers == "" {
 		t.Skip("EVENTS_KAFKA_BROKERS must be set to run this test")
 	}
-	return Brokers(brokers)
+	return Brokers(strings.Split(brokers, " "))
 }
 
 var CommonInjectors = nject.Sequence("common",
