@@ -44,6 +44,9 @@ transactional guarantees) or outside a transaction (without guarantees).
 To consume a topic, you can do so with one line. You need to pick which flavor of consumer
 to use (idempotent, exactly-once, or broadcast). 
 
+When used with a database, two tables are needed: one to track events created during a transaction
+and another to track the consumption of exactly-once events.
+
 ## Initialize the library
 
 In `init()` or in `main()`, create an instance:
@@ -263,6 +266,17 @@ features are not available:
 - produce from within a transaction
 - catch up production
 - exactly once consumption
+
+## Database configuration
+
+The required tables can be created with [libschema](https://github.com/muir/libschema) or
+they can be created through other means. See the `Migrations` function in
+[events2](https://pkg.go.dev/github.com/singlestore-labs/events/events2#Migrations) for SingleStore migrations or 
+[eventpg](https://pkg.go.dev/github.com/singlestore-labs/events/eventpg#Migrations) for PostgreSQL migrations.
+See examples of using libschema in the 
+[events2/shared_test](https://github.com/singlestore-labs/events/blob/main/events2/shared_test.go)
+and
+[eventpg/shared_test](https://github.com/singlestore-labs/events/blob/main/eventpg/shared_test.go).
 
 ## Kafka configuration
 
