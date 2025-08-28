@@ -1,6 +1,6 @@
 module github.com/singlestore-labs/events
 
-go 1.22
+go 1.23.0
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
@@ -17,7 +17,7 @@ require (
 	github.com/muir/nject/v2 v2.1.0
 	github.com/muir/testinglogur v0.0.1
 	github.com/prometheus/client_golang v1.22.0
-	github.com/segmentio/kafka-go v0.4.48
+	github.com/segmentio/kafka-go v0.4.49
 	github.com/sharnoff/eventdistributor v0.1.1
 	github.com/singlestore-labs/generic v0.5.0
 	github.com/singlestore-labs/once v0.0.1
@@ -52,7 +52,7 @@ require (
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	golang.org/x/exp v0.0.0-20230522175609-2e198f4a06a1 // indirect
 	golang.org/x/sys v0.30.0 // indirect
-	golang.org/x/text v0.21.0 // indirect
+	golang.org/x/text v0.23.0 // indirect
 	google.golang.org/protobuf v1.36.5 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
