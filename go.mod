@@ -23,7 +23,7 @@ require (
 	github.com/singlestore-labs/once v0.0.1
 	github.com/singlestore-labs/simultaneous v0.0.1
 	github.com/singlestore-labs/wait v0.0.1
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 )
 
 require (
