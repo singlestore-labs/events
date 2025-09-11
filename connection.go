@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"regexp"
 	"strings"
@@ -602,11 +603,14 @@ func (lib *Library[ID, TX, DB]) Tracer() eventmodels.Tracer         { return lib
 // controller is needed for certain requests, like creating a topic
 func (lib *LibraryNoDB) getController(ctx context.Context) (_ *kafka.Client, err error) {
 	dialer := lib.dialer()
-	for i, broker := range lib.brokers {
+	var tried int
+	for _, i := range rand.Perm(len(lib.brokers)) {
+		tried++
+		broker := lib.brokers[i]
 		conn, err := dialer.DialContext(ctx, "tcp", broker)
 		if err != nil {
 			lib.tracer.Logf("[events] could not connect to broker %d (of %d) %s: %v", i+1, len(lib.brokers), broker, err)
-			if i == len(lib.brokers)-1 {
+			if tried == len(lib.brokers) {
 				// last broker, give up
 				return nil, errors.Errorf("event library dial kafka broker (%s): %w", broker, err)
 			}
