@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"sync"
 	"time"
@@ -118,7 +119,8 @@ func (lib *Library[ID, TX, DB]) transactionalFallbackWrite(ctx context.Context, 
 	lib.tracer.Logf("[events] attempting transactional fallback for %d messages across topics %v", len(messages), topics)
 
 	// Try each broker in sequence
-	for i, broker := range lib.brokers {
+	for _, i := range rand.Perm(len(lib.brokers)) {
+		broker := lib.brokers[i]
 		lib.tracer.Logf("[events] trying transactional write to broker %d/%d: %s", i+1, len(lib.brokers), broker)
 
 		err := lib.tryTransactionalWriteWithBroker(ctx, broker, messages)
@@ -128,11 +130,6 @@ func (lib *Library[ID, TX, DB]) transactionalFallbackWrite(ctx context.Context, 
 		}
 
 		lib.tracer.Logf("[events] transactional write failed with broker %s: %v", broker, err)
-
-		// Continue to next broker unless this is the last one
-		if i < len(lib.brokers)-1 {
-			continue
-		}
 	}
 
 	lib.tracer.Logf("[events] transactional fallback failed on all %d brokers", len(lib.brokers))
