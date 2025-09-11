@@ -109,10 +109,6 @@ NewGroup:
 			reader, readerConfig, err = lib.getBroadcastReader(ctx, broadcastConsumerGroup, true)
 			if err != nil {
 				if errors.Is(err, errGroupUnavailable) {
-					// errGroupUnavailable is only returned for groups that are definitely unavailable
-					// we must try a different group to proceed.
-					// It's important that errGroupUnavailable is returned exactly for the times
-					// when the problem is that the group is in use.
 					lib.tracer.Logf("[events] potential broadcast group %s was not available: %s", broadcastConsumerGroup, err)
 					continue NewGroup
 				}
@@ -132,6 +128,13 @@ NewGroup:
 	return broadcastConsumerGroup, reader, readerConfig, unlock, nil
 }
 
+// errGroupUnavailable is only returned for groups that are definitely unavailable
+// and we must try a different group to proceed.
+// It's important that errGroupUnavailable is returned exactly for the times
+// when the problem is that the group is already in use. If it's returned for other
+// errors, then we'll give up on perfectly valid groups. If it's not returned for
+// an error when the group is unavailable, we'll keep trying the same unavailable
+// group over and over.
 const errGroupUnavailable errors.String = "consumer group is unavailable"
 
 // refreshBroadcastReader attempts to re-allocate the same group that was already being used. If that's not successful,
