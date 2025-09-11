@@ -120,13 +120,13 @@ func SASLConfigFromString(s string) sasl.Mechanism {
 }
 
 func (lib *LibraryNoDB) dialer() *kafka.Dialer {
-	nBrokers := time.Duration(len(lib.brokers))
+	nBrokers := len(lib.brokers)
 	if nBrokers == 0 {
 		nBrokers = 1
 	}
 	return &kafka.Dialer{
 		ClientID:      lib.clientID,
-		Timeout:       dialTimeout * nBrokers, // timeout is divided by number of brokers
+		Timeout:       dialTimeout * time.Duration(nBrokers), // timeout is divided by number of brokers
 		DualStack:     true,
 		KeepAlive:     time.Second * 5,
 		SASLMechanism: lib.mechanism,
