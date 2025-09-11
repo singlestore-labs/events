@@ -19,7 +19,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/segmentio/kafka-go v0.4.49
 	github.com/sharnoff/eventdistributor v0.1.1
-	github.com/singlestore-labs/generic v0.4.0
+	github.com/singlestore-labs/generic v0.5.0
 	github.com/singlestore-labs/once v0.0.1
 	github.com/singlestore-labs/simultaneous v0.0.1
 	github.com/singlestore-labs/wait v0.0.1
