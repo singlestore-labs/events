@@ -126,7 +126,7 @@ func TestBroadcastGroupRefresh(t *testing.T) {
 
 			for try := 1; try <= 10; try++ {
 				t.Log("attempt #%d to reuse the consumer group", try)
-				g1, r1, _, u1, err := lib1.getBroadcastConsumerGroup(ctx, false)
+				g1, r1, _, u1, err := lib1.getBroadcastConsumerGroup(ctx, time.Duration(0))
 				require.NoError(t, err)
 				t.Logf("got group %s", g1)
 				t.Log("closing the reader, unlocking the group")

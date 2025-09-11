@@ -38,6 +38,7 @@ const (
 	baseBroadcastHeartbeat              = time.Second * 10
 	broadcastHeartbeatRandom            = 0.25
 	broadcastNotCoordinatorErrorRetries = 50
+	broadcastStartupMaxWait             = 15 * time.Minute // only checked on group allocation failure
 	nonBroadcastReaderIdleTimeout       = 5 * time.Minute
 	broadcastReaderIdleTimeout          = baseBroadcastHeartbeat * 3 // This cannot be < 1s: Kafka takes a while to deliver events after reader startup or generation change
 	maxConsumerGroupNameLength          = 35
