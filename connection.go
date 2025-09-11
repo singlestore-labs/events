@@ -42,8 +42,8 @@ const (
 	broadcastReaderIdleTimeout          = baseBroadcastHeartbeat * 3 // This cannot be < 1s: Kafka takes a while to deliver events after reader startup or generation change
 	maxConsumerGroupNameLength          = 35
 	dialTimeout                         = time.Minute * 2
-	deleteTimeout                       = time.Minute * 2
-	describeTimeout                     = time.Minute * 2
+	deleteTimeout                       = time.Minute * 4
+	describeTimeout                     = time.Minute * 4
 	produceFromTableBuffer              = 512
 	readerStartupSleep                  = time.Millisecond * 100
 	readerStartupReport                 = time.Minute

@@ -475,14 +475,26 @@ func broadcastTopics(topics []string) []string {
 // The only error that getReader returns is from context cancellation
 func (lib *Library[ID, TX, DB]) getReader(ctx context.Context, consumerGroup consumerGroupName, topics []string, isBroadcast bool, resetPosition bool) (*kafka.Reader, *kafka.ReaderStats, *kafka.ReaderConfig, error) {
 	readerConfig := kafka.ReaderConfig{
-		Brokers:     lib.brokers,
-		GroupID:     consumerGroup.String(),
-		GroupTopics: topics,
-		MaxBytes:    maxBytes,
-		Dialer:      lib.dialer(),
-		StartOffset: kafka.FirstOffset,
+		Brokers:                lib.brokers,
+		GroupID:                consumerGroup.String(),
+		GroupTopics:            topics,
+		MaxBytes:               maxBytes,
+		Dialer:                 lib.dialer(),
+		StartOffset:            kafka.FirstOffset,
+		WatchPartitionChanges:  true,
+		MaxAttempts:            6,                        // connection attempts, default is 3
+		ReadLagInterval:        10 * time.Second,         // default is 0
+		MaxWait:                10 * time.Second,         // default is 10s
+		ReadBatchTimeout:       10 * time.Second,         // default is 10s
+		PartitionWatchInterval: 5 * time.Second,          // default is 5s
+		CommitInterval:         0,                        //  default is 0, synchronous
+		HeartbeatInterval:      3 * time.Second,          // default is 3s
+		ReadBackoffMin:         100 * time.Millisecond,   // default is 100ms
+		ReadBackoffMax:         1 * time.Second,          // default is 1s
+		RetentionTime:          21 * 86400 * time.Second, // how long to remember the consumer group; 21 days, default is 7 days
 	}
 	if isBroadcast {
+		readerConfig.RetentionTime = broadcastReaderIdleTimeout * 2 // forget this consumer group quickly when inactive
 		if resetPosition {
 			if debugConsumeStartup {
 				lib.tracer.Logf("[events] Debug: consume %s setting start offset = last offset", consumerGroup)
