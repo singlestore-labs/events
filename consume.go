@@ -861,10 +861,16 @@ func (lib *Library[ID, TX, DB]) processCommits(softCtx context.Context, hardCtx 
 				// either hardCtx or backoffCtx could be used here
 				err := reader.CommitMessages(hardCtx, messages...)
 				if err != nil {
-					_ = lib.RecordErrorNoWait("kafka commit error", errors.Errorf("consumer commit of (%d) messages failed: %w", len(messages), err))
 					if !backoff.Continue(b) {
+						_ = lib.RecordErrorNoWait("kafka commit error", errors.Errorf("consumer commit of (%d) messages failed: %w", len(messages), err))
 						lib.tracer.Logf("[events] consume done processing commits, dropping some")
 						return true
+					}
+					if errors.Is(err, kafka.NotCoordinatorForGroup) {
+						// NotCoordinatorForGroup is an expected error, just log a warning
+						lib.tracer.Logf("[events] warning: commit failed due to not coordinator for group; will retry (%d messages): %v", len(messages), err)
+					} else {
+						_ = lib.RecordErrorNoWait("kafka commit error", errors.Errorf("consumer commit of (%d) messages failed: %w", len(messages), err))
 					}
 					continue
 				}
