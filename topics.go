@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -169,7 +170,8 @@ func (lib *LibraryNoDB) listAvailableTopics() {
 	dialer := lib.dialer()
 	for {
 		lib.tracer.Logf("[events] starting over on listing topics")
-		for _, broker := range lib.brokers {
+		for _, i := range rand.Perm(len(lib.brokers)) {
+			broker := lib.brokers[i]
 			lib.tracer.Logf("[events] connecting to %s to list topics", broker)
 			conn, err := dialer.Dial("tcp", broker)
 			if err != nil {
