@@ -34,7 +34,7 @@ docker run -d \
   -e KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
   -e KAFKA_CFG_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
   -e GROUP_ID=1 \
-  bitnami/kafka:3.6.2
+  bitnamilegacy/kafka:3.6.2
 
 EVENTS_KAFKA_BROKERS=localhost:9092
 
