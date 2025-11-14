@@ -13,7 +13,7 @@ require (
 	github.com/memsql/keyeddistributor v0.1.0
 	github.com/memsql/ntest v0.8.0
 	github.com/muir/gwrap v0.4.0
-	github.com/muir/libschema v0.6.1
+	github.com/muir/libschema v0.7.0
 	github.com/muir/nject/v2 v2.1.0
 	github.com/muir/testinglogur v0.0.1
 	github.com/prometheus/client_golang v1.23.2

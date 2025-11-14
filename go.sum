@@ -47,8 +47,8 @@ github.com/memsql/refcountmap v0.1.1 h1:tcYPE9pRlVv7uwbDUY2E+sjhD/zBRRWvPQ0pz8II
 github.com/memsql/refcountmap v0.1.1/go.mod h1:kJR6RIBAI4iZgNo7hqQZZSmWWHNv+5t9X3RbOku86nk=
 github.com/muir/gwrap v0.4.0 h1:BfkdL6wxEv9Q7rdXoxz89+Wa65GZ9iNYPlCprL1sYXU=
 github.com/muir/gwrap v0.4.0/go.mod h1:PnlMM/ojXLQphLLZyxiZOU+T1O7NVXYsfJfABv5he+M=
-github.com/muir/libschema v0.6.1 h1:ErXRvX3e+nXF4vrZ2aa+9hHWLF3Z4p8EXE8fcfjrXe4=
-github.com/muir/libschema v0.6.1/go.mod h1:JxXPc4vFAaWOojn4cYnQHxNS7jM2yWvZxlsBERgU25M=
+github.com/muir/libschema v0.7.0 h1:9sDGejBqPSB2IvnMsWCIKUzH21SVAVp4EYicVSu0HDs=
+github.com/muir/libschema v0.7.0/go.mod h1:9MI25nMwCvoUgER+n8vT/dRbLtjWyVjbZmJ55cEbqE8=
 github.com/muir/nject/v2 v2.1.0 h1:6O1uvvOcXOcZ7RtGblpB2yxDIoEGcbMj4lOqHu7A3z0=
 github.com/muir/nject/v2 v2.1.0/go.mod h1:cjqpJ4dBVi52Ny0GyPejQ3mK+Vl5mvaTowhfLNIb/ew=
 github.com/muir/reflectutils v0.11.0 h1:h3rJpAq3KcKh65DLcrFgkzXdpmTHNOX66ar8/VQGrRg=
