@@ -5,7 +5,7 @@ go 1.23.0
 require (
 	github.com/Masterminds/squirrel v1.5.4
 	github.com/go-sql-driver/mysql v1.9.3
-	github.com/gofrs/uuid/v5 v5.3.2
+	github.com/gofrs/uuid/v5 v5.4.0
 	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/backoff/v2 v2.0.8
 	github.com/lib/pq v1.10.9
@@ -13,7 +13,7 @@ require (
 	github.com/memsql/keyeddistributor v0.1.0
 	github.com/memsql/ntest v0.8.0
 	github.com/muir/gwrap v0.4.0
-	github.com/muir/libschema v0.6.1
+	github.com/muir/libschema v0.7.0
 	github.com/muir/nject/v2 v2.1.0
 	github.com/muir/testinglogur v0.0.1
 	github.com/prometheus/client_golang v1.23.2

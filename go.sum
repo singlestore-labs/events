@@ -11,8 +11,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/go-sql-driver/mysql v1.9.3 h1:U/N249h2WzJ3Ukj8SowVFjdtZKfu9vlLZxjPXV1aweo=
 github.com/go-sql-driver/mysql v1.9.3/go.mod h1:qn46aNg1333BRMNU69Lq93t8du/dwxI64Gl8i5p1WMU=
-github.com/gofrs/uuid/v5 v5.3.2 h1:2jfO8j3XgSwlz/wHqemAEugfnTlikAYHhnqQ8Xh4fE0=
-github.com/gofrs/uuid/v5 v5.3.2/go.mod h1:CDOjlDMVAtN56jqyRUZh58JT31Tiw7/oQyEXZV+9bD8=
+github.com/gofrs/uuid/v5 v5.4.0 h1:EfbpCTjqMuGyq5ZJwxqzn3Cbr2d0rUZU7v5ycAk/e/0=
+github.com/gofrs/uuid/v5 v5.4.0/go.mod h1:CDOjlDMVAtN56jqyRUZh58JT31Tiw7/oQyEXZV+9bD8=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
@@ -47,8 +47,8 @@ github.com/memsql/refcountmap v0.1.1 h1:tcYPE9pRlVv7uwbDUY2E+sjhD/zBRRWvPQ0pz8II
 github.com/memsql/refcountmap v0.1.1/go.mod h1:kJR6RIBAI4iZgNo7hqQZZSmWWHNv+5t9X3RbOku86nk=
 github.com/muir/gwrap v0.4.0 h1:BfkdL6wxEv9Q7rdXoxz89+Wa65GZ9iNYPlCprL1sYXU=
 github.com/muir/gwrap v0.4.0/go.mod h1:PnlMM/ojXLQphLLZyxiZOU+T1O7NVXYsfJfABv5he+M=
-github.com/muir/libschema v0.6.1 h1:ErXRvX3e+nXF4vrZ2aa+9hHWLF3Z4p8EXE8fcfjrXe4=
-github.com/muir/libschema v0.6.1/go.mod h1:JxXPc4vFAaWOojn4cYnQHxNS7jM2yWvZxlsBERgU25M=
+github.com/muir/libschema v0.7.0 h1:9sDGejBqPSB2IvnMsWCIKUzH21SVAVp4EYicVSu0HDs=
+github.com/muir/libschema v0.7.0/go.mod h1:9MI25nMwCvoUgER+n8vT/dRbLtjWyVjbZmJ55cEbqE8=
 github.com/muir/nject/v2 v2.1.0 h1:6O1uvvOcXOcZ7RtGblpB2yxDIoEGcbMj4lOqHu7A3z0=
 github.com/muir/nject/v2 v2.1.0/go.mod h1:cjqpJ4dBVi52Ny0GyPejQ3mK+Vl5mvaTowhfLNIb/ew=
 github.com/muir/reflectutils v0.11.0 h1:h3rJpAq3KcKh65DLcrFgkzXdpmTHNOX66ar8/VQGrRg=
