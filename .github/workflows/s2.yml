@@ -64,12 +64,12 @@ jobs:
           mysql -u root -ptest -e "SET GLOBAL data_conversion_compatibility_level = '7.0'" -h 127.0.0.1
 
       - name: Check out repository code
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
 
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00
         with:
-          go-version: '1.22'
+          go-version: '1.23'
 
       - name: Get Go cache paths
         id: go-cache-paths
