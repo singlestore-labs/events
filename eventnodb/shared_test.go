@@ -48,6 +48,7 @@ var chain = nject.Sequence("nodb-injectors",
 )
 
 func TestSharedEventNoDB(t *testing.T) {
+	t.Log("starting no-database matrix tests")
 	ntest.RunParallelMatrix(ntest.BufferedLogger(t),
 		chain,
 		eventtest.GenerateSharedTestMatrix[eventmodels.BinaryEventID, *eventnodb.NoDBTx, *eventnodb.NoDB](),

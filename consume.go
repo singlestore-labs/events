@@ -91,12 +91,12 @@ func (lib *Library[ID, TX, DB]) StartConsuming(ctx context.Context) (started cha
 		lib.tracer.Logf("[events] Debug: consume startwait +%d for readers", len(lib.readers))
 	}
 	allStarted.Add(len(lib.readers))
-	allDone.Add(len(lib.readers))
+	allDone.Add(len(lib.readers)) // for each reader
 	if debugConsumeStartup {
 		lib.tracer.Logf("[events] Debug: allDone +%d (readers)", len(lib.readers))
 	}
 	if len(lib.broadcast.topics) > 0 {
-		allDone.Add(1)
+		allDone.Add(1) // for the consumer group consumer
 		if debugConsumeStartup {
 			lib.tracer.Logf("[events] Debug: consume startwait +1 for broadcast")
 			lib.tracer.Logf("[events] Debug: allDone +1 broadcast")
@@ -145,7 +145,7 @@ func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consume
 	// startedSideEffects should be called only once the consumer is started
 	startedSideEffects := once.New(func() {
 		if isBroadcast {
-			allDone.Add(1)
+			allDone.Add(1) // for the heartbeat sending
 			if debugConsumeStartup {
 				lib.tracer.Logf("[events] Debug: allDone +1 for broadcast heartbeat %s %s", consumerGroup, group.Describe())
 			}
@@ -300,7 +300,7 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 	if debugConsumeStartup {
 		lib.tracer.Logf("[events] Debug: allDone +1 for process commits for %s %s", consumerGroup, group.Describe())
 	}
-	allDone.Add(1)
+	allDone.Add(1) // for processCommits
 	go lib.processCommits(commitsSoftCtx, ctx, consumerGroup, cg, reader, done, allDone)
 	for {
 		select {
