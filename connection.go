@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -93,6 +94,22 @@ type Library[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventm
 }
 
 type LibraryNoDB struct {
+	// --- Size cap subsystem fields (producer-only, decoupled from topic creation) ---
+	// Global broker caps
+	sizeCapBrokerState      atomic.Int32 // 0=unstarted 1=loading 2=ready 3=failed
+	sizeCapBrokerReady      chan struct{}
+	sizeCapBrokerMessageMax atomic.Int64 // message.max.bytes (0 unknown)
+	sizeCapSocketRequestMax atomic.Int64 // socket.request.max.bytes (rarely limiting; 0 unknown)
+	sizeCapBrokerErr        atomic.Value // error or nil
+	sizeCapDefaultAssumed   int64        // anything smaller than this can be sent before knowing actual limits
+
+	// Precreated topics scan (enumeration of already seen topics; optional background)
+	sizeCapPrecreatedState atomic.Int32 // 0=unstarted 1=running 2=done 3=failed
+	sizeCapPrecreatedReady chan struct{}
+
+	// Per-topic limits map (separate from creatingTopic). Keys are topic names.
+	sizeCapTopicLimits gwrap.SyncMap[string, *sizeCapTopicLimit]
+
 	hasDB                     atomic.Bool
 	tracer                    eventmodels.Tracer
 	brokers                   []string
@@ -233,6 +250,8 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 			doEnhance:                true,
 			instanceID:               instanceCount.Add(1),
 			topicsHaveBeenListed:     make(chan struct{}),
+			sizeCapBrokerReady:       make(chan struct{}),
+			sizeCapDefaultAssumed:    1_000_000,
 		},
 	}
 }
@@ -284,6 +303,14 @@ func (lib *Library[ID, TX, DB]) SetLazyTxProduce(lazy bool) {
 	defer lib.lock.Unlock()
 	lib.mustNotBeRunning("attempt configure event library that is already processing")
 	lib.lazyProduce = lazy
+}
+
+// SetSizeCapLowerLimit overrides the default lower limit on sizes: any message under
+// this size can be sent before actual limits are known.
+func (lib *Library[ID, TX, DB]) SetSizeCapLowerLimit(sizeCapDefaultAssumed int64) {
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	lib.sizeCapDefaultAssumed = sizeCapDefaultAssumed
 }
 
 // Configure sets up the Library so that it has the configuration it needs to run.
@@ -603,6 +630,32 @@ func (lib *Library[ID, TX, DB]) Tracer() eventmodels.Tracer         { return lib
 // getController returns a client talking to the controlling broker. The
 // controller is needed for certain requests, like creating a topic
 func (lib *LibraryNoDB) getController(ctx context.Context) (_ *kafka.Client, err error) {
+	var c *kafka.Client
+	err = lib.findABroker(ctx, func(conn *kafka.Conn) error {
+		controller, err := conn.Controller()
+		if err != nil {
+			return errors.Errorf("event library get controller from kafka connection: %w", err)
+		}
+		ips, err := net.LookupIP(controller.Host)
+		if err != nil {
+			return errors.Errorf("event library lookup IP of controller (%s): %w", controller.Host, err)
+		}
+		if len(ips) == 0 {
+			return errors.Errorf("event library lookup IP of controller (%s) got no addresses", controller.Host)
+		}
+		c = &kafka.Client{
+			Addr: &net.TCPAddr{
+				IP:   ips[0],
+				Port: controller.Port,
+			},
+			Transport: lib.transport(),
+		}
+		return nil
+	})
+	return c, err
+}
+
+func (lib *LibraryNoDB) findABroker(ctx context.Context, f func(*kafka.Conn) error) (err error) {
 	dialer := lib.dialer()
 	var tried int
 	for _, i := range rand.Perm(len(lib.brokers)) {
@@ -613,7 +666,7 @@ func (lib *LibraryNoDB) getController(ctx context.Context) (_ *kafka.Client, err
 			lib.tracer.Logf("[events] could not connect to broker %d (of %d) %s: %v", i+1, len(lib.brokers), broker, err)
 			if tried == len(lib.brokers) {
 				// last broker, give up
-				return nil, errors.Errorf("event library dial kafka broker (%s): %w", broker, err)
+				return errors.Errorf("event library dial kafka broker (%s): %w", broker, err)
 			}
 			continue
 		}
@@ -623,27 +676,31 @@ func (lib *LibraryNoDB) getController(ctx context.Context) (_ *kafka.Client, err
 				err = errors.Errorf("event library close dialer (%s): %w", lib.brokers[0], err)
 			}
 		}()
-		controller, err := conn.Controller()
-		if err != nil {
-			return nil, errors.Errorf("event library get controller from kafka connection: %w", err)
-		}
-		ips, err := net.LookupIP(controller.Host)
-		if err != nil {
-			return nil, errors.Errorf("event library lookup IP of controller (%s): %w", controller.Host, err)
-		}
-		if len(ips) == 0 {
-			return nil, errors.Errorf("event library lookup IP of controller (%s) got no addresses", controller.Host)
-		}
-		return &kafka.Client{
-			Addr: &net.TCPAddr{
-				IP:   ips[0],
-				Port: controller.Port,
-			},
-			Transport: lib.transport(),
-		}, nil
+		return f(conn)
 	}
-	// should not be able to get here
-	return nil, errors.Errorf("unexpected condition")
+	return errors.Errorf("unexpected condition")
+}
+
+func (lib *LibraryNoDB) getBrokers(ctx context.Context) ([]kafka.Broker, error) {
+	var brokers []kafka.Broker
+	err := lib.findABroker(ctx, func(conn *kafka.Conn) error {
+		var err error
+		brokers, err = conn.Brokers()
+		return err
+	})
+	return brokers, err
+}
+
+func (lib *LibraryNoDB) getABrokerID(ctx context.Context) (string, error) {
+	brokers, err := lib.getBrokers(ctx)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+	if len(brokers) == 0 {
+		return "", errors.Errorf("get brokers request returned no brokers")
+	}
+	broker := brokers[rand.Intn(len(brokers))]
+	return strconv.Itoa(broker.ID), nil
 }
 
 // getConsumerGroupCoordinator returns a client talking to the control group's
