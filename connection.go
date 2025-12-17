@@ -23,6 +23,7 @@ import (
 
 	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/singlestore-labs/events/internal"
+	"github.com/singlestore-labs/events/internal/pwork"
 )
 
 var _ eventmodels.Producer[eventmodels.StringEventID, eventmodels.AbstractTX] = &Library[eventmodels.StringEventID, eventmodels.AbstractTX, eventmodels.AbstractDB[eventmodels.StringEventID, eventmodels.AbstractTX]]{}
@@ -102,7 +103,7 @@ type LibraryNoDB struct {
 	startTime                 time.Time
 	ready                     atomic.Int32
 	topicConfig               map[string]kafka.TopicConfig
-	topicsSeen                gwrap.SyncMap[string, *creatingTopic] // messages with topic can be sent when channel is closed
+	topicsWork                pwork.Work[string, topicsWhy]
 	topicListingStarted       sync.Once
 	topicsHaveBeenListed      chan struct{}
 	mustRegisterTopics        bool
@@ -122,6 +123,7 @@ type LibraryNoDB struct {
 	ProduceSyncCount          atomic.Uint64 // used and exported for testing only
 	instanceID                int32
 	lazyProduce               bool
+	skipNotifier              bool
 
 	// lock must be held when....
 	//
@@ -216,7 +218,7 @@ type canHandle interface {
 // Configure() and Consume*() may not be used once consumption or production
 // has started.
 func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodels.AbstractDB[ID, TX]]() *Library[ID, TX, DB] {
-	return &Library[ID, TX, DB]{
+	lib := Library[ID, TX, DB]{
 		produceFromTable: make(chan []ID, produceFromTableBuffer),
 		LibraryNoDB: LibraryNoDB{
 			startTime: time.Now(),
@@ -235,6 +237,8 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 			topicsHaveBeenListed:     make(chan struct{}),
 		},
 	}
+	lib.configureTopicsPrework()
+	return &lib
 }
 
 // For testing
@@ -286,6 +290,15 @@ func (lib *Library[ID, TX, DB]) SetLazyTxProduce(lazy bool) {
 	lib.lazyProduce = lazy
 }
 
+// SkipNotifierSupport turns off support for runtime subscription to broadcast topics
+// via RegisterFiltered and RegisterUnfiltered. This is mostly used in testing the events library.
+func (lib *Library[ID, TX, DB]) SkipNotifierSupport() {
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	lib.mustNotBeRunning("attempt configure event library that is already processing")
+	lib.skipNotifier = true
+}
+
 // Configure sets up the Library so that it has the configuration it needs to run.
 // The database connection is optional. Without it, certain features will always error:
 //
@@ -294,7 +307,9 @@ func (lib *Library[ID, TX, DB]) SetLazyTxProduce(lazy bool) {
 //
 // The conn parameter may be nil, in which case CatchUpProduce() and ProduceFromTable() will error.
 func (lib *Library[ID, TX, DB]) Configure(conn DB, tracer eventmodels.Tracer, mustRegisterTopics bool, saslMechanism sasl.Mechanism, tlsConfig *TLSConfig, brokers []string) {
-	processRegistrationTodo(lib) // before taking lock to avoid deadlock
+	if !lib.skipNotifier {
+		processRegistrationTodo(lib) // before taking lock to avoid deadlock
+	}
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
 	lib.mustNotBeRunning("attempt configure event library that is already processing")
