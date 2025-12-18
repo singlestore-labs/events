@@ -218,6 +218,10 @@ func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consume
 						return
 					}
 					_ = lib.RecordError("reader set offset", errors.Errorf("could not set reader offset for (%s): %w", consumerGroup, err))
+					err = reader.Close()
+					if err != nil {
+						_ = lib.RecordError("reader close error", errors.Errorf("could not close reader for consumerGroup (%s): %w", consumerGroup, err))
+					}
 					reader = nil
 					continue
 				}
