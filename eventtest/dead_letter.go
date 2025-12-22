@@ -25,9 +25,10 @@ func DeadLetterDiscardTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	DeadLetterTest(ctx, t, conn, brokers, cancel,
-		eventmodels.OnFailureDiscard, "DLD")
+		eventmodels.OnFailureDiscard, "DLD", prefix)
 }
 
 func DeadLetterBlockTest[
@@ -40,9 +41,10 @@ func DeadLetterBlockTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	DeadLetterTest(ctx, t, conn, brokers, cancel,
-		eventmodels.OnFailureBlock, "DLB")
+		eventmodels.OnFailureBlock, "DLB", prefix)
 }
 
 func DeadLetterSaveTest[
@@ -55,9 +57,10 @@ func DeadLetterSaveTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	DeadLetterTest(ctx, t, conn, brokers, cancel,
-		eventmodels.OnFailureSave, "DLS")
+		eventmodels.OnFailureSave, "DLS", prefix)
 }
 
 func DeadLetterRetryLaterTest[
@@ -70,9 +73,10 @@ func DeadLetterRetryLaterTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	DeadLetterTest(ctx, t, conn, brokers, cancel,
-		eventmodels.OnFailureRetryLater, "DLRL")
+		eventmodels.OnFailureRetryLater, "DLRL", prefix)
 }
 
 func DeadLetterTest[
@@ -86,11 +90,12 @@ func DeadLetterTest[
 	brokers Brokers,
 	cancel Cancel,
 	onFailure eventmodels.OnFailure,
-	prefix string,
+	testPrefix string,
+	libraryPrefix Prefix,
 ) {
 	defer cancel()
 	baseT := t
-	t = ntest.ExtraDetailLogger(t, prefix)
+	t = ntest.ExtraDetailLogger(t, string(libraryPrefix)+testPrefix)
 	type deliveryInfoBlock struct {
 		name      string
 		topic     string
@@ -109,6 +114,7 @@ func DeadLetterTest[
 	t.Log("setting up 1st events library instance")
 	lib := events.New[ID, TX, DB]()
 	lib.SkipNotifierSupport()
+	lib.SetPrefix(string(libraryPrefix))
 	if !IsNilDB(conn) {
 		conn.AugmentWithProducer(lib)
 	}
@@ -145,7 +151,7 @@ func DeadLetterTest[
 	lib.ConsumeIdempotent(consumerGroup, onFailure, Name(t)+"CIH", topic.Handler(mkHandler("first")), events.WithTimeout(configuredTimeout))
 
 	firstCtx, cancelFirst := context.WithCancel(ctx)
-	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, prefix+"1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, string(libraryPrefix)+testPrefix+"1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	firstDone := lib.StartConsumingOrPanic(firstCtx)
 
 	body := myType{
@@ -165,13 +171,14 @@ func DeadLetterTest[
 	t.Log("starting up second events library")
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SkipNotifierSupport()
+	lib2.SetPrefix(string(libraryPrefix))
 	if onFailure == eventmodels.OnFailureSave {
 		t.Log("second events library is consuming directly from the dead letter topic")
-		lib2.ConsumeIdempotent(consumerGroup, eventmodels.OnFailureBlock, "deadLetterDirect", deadLetterTopic.Handler(mkHandler("deadLetterDirect")), events.WithTimeout(configuredTimeout))
+		lib2.ConsumeIdempotent(consumerGroup, eventmodels.OnFailureBlock, Name(t)+"DLd", deadLetterTopic.Handler(mkHandler("deadLetterDirect")), events.WithTimeout(configuredTimeout))
 	} else {
 		lib2.ConsumeIdempotent(consumerGroup, onFailure, Name(t)+"CIH", topic.Handler(mkHandler("second")), events.WithTimeout(configuredTimeout))
 	}
-	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, prefix+"2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, string(libraryPrefix)+testPrefix+"2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	// this assignment is thread-safe because lib1 is completely shut down and lib2 hasn't started yet
 	secondSignal := make(chan struct{})
 	signal = &secondSignal

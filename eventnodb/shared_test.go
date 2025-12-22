@@ -41,6 +41,7 @@ EVENTS_KAFKA_BROKERS=localhost:9092
 */
 
 var chain = nject.Sequence("nodb-injectors",
+	eventtest.Prefix("NoDB_"),
 	eventtest.CommonInjectors,
 	nject.Provide("nodb", func() *eventnodb.NoDB {
 		return nil // Pass nil connection to trigger no-database behavior

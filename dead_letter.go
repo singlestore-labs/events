@@ -18,9 +18,9 @@ const (
 
 // DeadLetterTopic returns the topic name to use for dead letters. The dead letter
 // topics include the consumer group name because otherwise messages could be
-// cross-delivered between consumer groups.
-func DeadLetterTopic(topic string, consumerGroup ConsumerGroupName) string {
-	return topic + "." + consumerGroup.String() + deadLetterTopicPostfix
+// cross-delivered between consumer groups. It consumes and returns un-prefixed topics.
+func DeadLetterTopic(unprefixedTopic string, consumerGroup ConsumerGroupName) string {
+	return unprefixedTopic + "." + consumerGroup.String() + deadLetterTopicPostfix
 }
 
 // startDeadLetterConsumers checks the handlers to see if any of them have onFailure set to

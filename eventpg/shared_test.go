@@ -65,6 +65,7 @@ func sqlDB(ctx context.Context, t ntest.T) *sql.DB {
 }
 
 var chain = nject.Sequence("pgtest-injectors",
+	eventtest.Prefix("PG_"),
 	eventtest.CommonInjectors,
 	sqlDB,
 	pgconn,

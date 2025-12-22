@@ -30,9 +30,10 @@ func OrderedBlockTestOneCG[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	OrderedTest(ctx, t, conn, brokers, cancel,
-		eventmodels.OnFailureBlock, "OB1", true)
+		eventmodels.OnFailureBlock, "OB1", true, prefix)
 }
 
 func OrderedBlockTestTwoCG[
@@ -45,9 +46,10 @@ func OrderedBlockTestTwoCG[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	OrderedTest(ctx, t, conn, brokers, cancel,
-		eventmodels.OnFailureBlock, "OB2", false)
+		eventmodels.OnFailureBlock, "OB2", false, prefix)
 }
 
 func OrderedRetryTestOncCG[
@@ -60,9 +62,10 @@ func OrderedRetryTestOncCG[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	OrderedTest(ctx, t, conn, brokers, cancel,
-		eventmodels.OnFailureRetryLater, "ORL1", true)
+		eventmodels.OnFailureRetryLater, "ORL1", true, prefix)
 }
 
 func OrderedRetryTestTwoCG[
@@ -75,9 +78,10 @@ func OrderedRetryTestTwoCG[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	OrderedTest(ctx, t, conn, brokers, cancel,
-		eventmodels.OnFailureRetryLater, "ORL2", false)
+		eventmodels.OnFailureRetryLater, "ORL2", false, prefix)
 }
 
 // OrderedTest sends events in different topics that have to be processed
@@ -93,8 +97,9 @@ func OrderedTest[
 	brokers Brokers,
 	cancel Cancel,
 	onFailure eventmodels.OnFailure,
-	prefix string,
+	testPrefix string,
 	oneConsumerGroup bool,
+	libraryPrefix Prefix,
 ) {
 	if IsNilDB(conn) {
 		t.Skipf("%s requires a database", t.Name())
@@ -102,7 +107,7 @@ func OrderedTest[
 	type myType map[string]string
 
 	baseT := t
-	t = ntest.ExtraDetailLogger(t, prefix)
+	t = ntest.ExtraDetailLogger(t, string(libraryPrefix)+testPrefix)
 
 	consumerGroup1 := events.NewConsumerGroup(Name(t) + "CG1")
 	var consumerGroup2 events.ConsumerGroupName
@@ -119,6 +124,7 @@ func OrderedTest[
 
 	lib := events.New[ID, TX, DB]()
 	lib.SkipNotifierSupport()
+	lib.SetPrefix(string(libraryPrefix))
 	conn.AugmentWithProducer(lib)
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic1.Topic()})
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic2.Topic()})
@@ -170,7 +176,7 @@ func OrderedTest[
 		return nil
 	}))
 
-	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, prefix+"-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, string(libraryPrefix)+testPrefix+"-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	consumeDone := lib.StartConsumingOrPanic(ctx)
 
 	t.Log("producing may take a few tries for brand new topics")
