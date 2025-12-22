@@ -17,10 +17,11 @@ import (
 var ErrDecode errors.String = "could not unmarshal message"
 
 // decode transforms a Kafka Message into a Event struct.
-func decode[E any](message *kafka.Message, consumerGroup string, handlerName string) (Event[E], error) {
+func decode[E any](message *kafka.Message, consumerGroup string, lib LibraryInterface, handlerName string) (Event[E], error) {
+	unprefixedTopic := lib.RemovePrefix(message.Topic)
 	meta := Event[E]{
-		Topic:         message.Topic,
-		Type:          message.Topic,
+		Topic:         unprefixedTopic,
+		Type:          unprefixedTopic,
 		Key:           string(message.Key),
 		Subject:       string(message.Key),
 		Headers:       make(http.Header),

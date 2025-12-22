@@ -37,6 +37,7 @@ func EventUnfilteredNotifierTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	func() {
 		unfilteredBindLock.Lock()
@@ -48,13 +49,14 @@ func EventUnfilteredNotifierTest[
 	}()
 
 	origT := t
-	t = ntest.ExtraDetailLogger(origT, "UNT")
+	t = ntest.ExtraDetailLogger(origT, string(prefix)+"UNT")
 	lib := events.New[ID, TX, DB]()
+	lib.SetPrefix(string(prefix))
 	if !IsNilDB(conn) {
 		lib.SetEnhanceDB(true)
 		conn.AugmentWithProducer(lib)
 	}
-	lib.Configure(conn, ntest.ExtraDetailLogger(origT, "UNT-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, ntest.ExtraDetailLogger(origT, string(prefix)+"UNT-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 
 	consumeDone := lib.StartConsumingOrPanic(ctx)
 
@@ -115,6 +117,7 @@ func EventComprehensiveNotifierTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	if IsNilDB(conn) {
 		// In theory this test could run w/o a database, but it would likely fail due to timing issues
@@ -144,11 +147,12 @@ func EventComprehensiveNotifierTest[
 	sendSleep := time.Millisecond * 2
 
 	origT := t
-	t = ntest.ExtraDetailLogger(origT, "TEN-O")
+	t = ntest.ExtraDetailLogger(origT, string(prefix)+"TEN-O")
 	lib := events.New[ID, TX, DB]()
 	lib.SetEnhanceDB(true)
+	lib.SetPrefix(string(prefix))
 	conn.AugmentWithProducer(lib)
-	lib.Configure(conn, ntest.ExtraDetailLogger(origT, "TEN-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, ntest.ExtraDetailLogger(origT, string(prefix)+"TEN-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 
 	// slowCtx is for the library
 	slowCtx, slowCtxCancel := context.WithCancel(ctx)
@@ -201,7 +205,7 @@ func EventComprehensiveNotifierTest[
 		defer wg.Done()
 		defer allChan.Unsubscribe()
 		//nolint:govet // shadows t on purpose
-		t := ntest.ExtraDetailLogger(origT, "TEN-ALL")
+		t := ntest.ExtraDetailLogger(origT, string(prefix)+"TEN-ALL")
 		for {
 			select {
 			case <-allChan.WaitChan():
@@ -223,7 +227,7 @@ func EventComprehensiveNotifierTest[
 	go func() {
 		defer wg.Done()
 		//nolint:govet // shadows t on purpose
-		t := ntest.ExtraDetailLogger(origT, "TEN-SEND")
+		t := ntest.ExtraDetailLogger(origT, string(prefix)+"TEN-SEND")
 		t.Log("starting to send")
 		var perm string
 		for i := 0; i < stopAfter; i++ {
@@ -273,7 +277,7 @@ func EventComprehensiveNotifierTest[
 		go func(i int) {
 			defer wg.Done()
 			//nolint:govet // shadows t on purpose
-			t := ntest.ExtraDetailLogger(origT, fmt.Sprintf("TEN-%dT", i))
+			t := ntest.ExtraDetailLogger(origT, fmt.Sprintf("%sTEN-%dT", prefix, i))
 			for j := 1; j < requiredIterations+2; j++ {
 				t.Logf("starting iteration %d", j)
 				filteredReader := filtered.Subscribe(lib, "1")
@@ -284,7 +288,7 @@ func EventComprehensiveNotifierTest[
 					defer close(gotOne)
 					defer filteredReader.Unsubscribe()
 					//nolint:govet // shadows t on purpose
-					t := ntest.ExtraDetailLogger(origT, fmt.Sprintf("TEN-flt-%dT-%d", i, j))
+					t := ntest.ExtraDetailLogger(origT, fmt.Sprintf("%sTEN-flt-%dT-%d", prefix, i, j))
 					t.Log("waiting")
 					if j <= requiredIterations {
 						select {
@@ -314,7 +318,7 @@ func EventComprehensiveNotifierTest[
 					defer wg.Done()
 					defer unfilteredReader.Unsubscribe()
 					//nolint:govet // shadows t on purpose
-					t := ntest.ExtraDetailLogger(origT, fmt.Sprintf("TEN-unfl-%dT-%d", i, j))
+					t := ntest.ExtraDetailLogger(origT, fmt.Sprintf("%sTEN-unfl-%dT-%d", prefix, i, j))
 					t.Log("sequence-two-S0")
 					select {
 					case <-gotOne:

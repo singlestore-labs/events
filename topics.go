@@ -32,6 +32,7 @@ const (
 	topicCreationDeadline    = time.Second * 30
 	defaultNumPartitions     = 2
 	defaultReplicationFactor = 3
+	debugPrefixIgnore        = false
 )
 
 // UnregisteredTopicError is the base error when attempting to create a
@@ -54,10 +55,10 @@ func (lib *LibraryNoDB) SetTopicConfig(topicConfig kafka.TopicConfig) {
 	lib.topicConfig[topicConfig.Topic] = topicConfig
 }
 
-func (lib *LibraryNoDB) getTopicConfig(topic string) (kafka.TopicConfig, bool) {
+func (lib *LibraryNoDB) getTopicConfig(unprefixedTopic string) (kafka.TopicConfig, bool) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
-	c, ok := lib.topicConfig[topic]
+	c, ok := lib.topicConfig[unprefixedTopic]
 	return c, ok
 }
 
@@ -77,7 +78,7 @@ func (lib *LibraryNoDB) createTopicsForOutgoingEvents(ctx context.Context, event
 
 // ValidateTopics will be fast whenever it can be fast. Sometimes it will
 // wait for topics to be listed. ValidateTopics topics can only be used after Configure.
-func (lib *Library[ID, TX, DB]) ValidateTopics(ctx context.Context, topics []string) error {
+func (lib *Library[ID, TX, DB]) ValidateTopics(ctx context.Context, unprefixedTopics []string) error {
 	err := lib.start("validate topics")
 	if err != nil {
 		return err
@@ -85,30 +86,30 @@ func (lib *Library[ID, TX, DB]) ValidateTopics(ctx context.Context, topics []str
 	if !lib.mustRegisterTopics {
 		return nil
 	}
-	for _, topic := range topics {
-		if _, ok := lib.getTopicConfig(topic); ok {
+	for _, unprefixedTopic := range unprefixedTopics {
+		if _, ok := lib.getTopicConfig(unprefixedTopic); ok {
 			continue
 		}
-		if topic == heartbeatTopic.Topic() {
+		if unprefixedTopic == heartbeatTopic.Topic() {
 			continue
 		}
 		if err := lib.waitForTopicsListing(ctx); err != nil {
 			return err
 		}
-		switch lib.topicsWork.GetState(topic) {
+		switch lib.topicsWork.GetState(unprefixedTopic) {
 		case pwork.ItemDone:
 			continue
 		case pwork.ItemDoesNotExist:
-			return errors.Errorf("topic (%s) is invalid", topic)
+			return errors.Errorf("topic (%s) is invalid", unprefixedTopic)
 		default:
-			return errors.Errorf("topic (%s) is invalid, or at least not created yet", topic)
+			return errors.Errorf("topic (%s) is invalid, or at least not created yet", unprefixedTopic)
 		}
 	}
 	return nil
 }
 
-func (lib *LibraryNoDB) precreateTopicsForConsuming(ctx context.Context, consumerGroup consumerGroupName, topics []string) error {
-	return lib.topicsWork.WorkUntilDone(ctx, topics, topicsWhy{
+func (lib *LibraryNoDB) precreateTopicsForConsuming(ctx context.Context, consumerGroup consumerGroupName, unprefixedTopics []string) error {
+	return lib.topicsWork.WorkUntilDone(ctx, unprefixedTopics, topicsWhy{
 		why:           "consume with " + consumerGroup.String(),
 		errorCategory: "preCreateTopicsForConsume",
 	})
@@ -125,35 +126,36 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 	lib.topicsWork.IsFatalError = func(err error) bool {
 		return errors.Is(err, UnregisteredTopicError)
 	}
-	lib.topicsWork.ClearedUp = func(_ context.Context, _ error, why topicsWhy, topics []string) {
-		lib.tracer.Logf("[events] prior error creating topics %v, preventing %s, has cleared up", topics, why.why)
+	lib.topicsWork.ClearedUp = func(_ context.Context, _ error, why topicsWhy, unprefixedTopics []string) {
+		lib.tracer.Logf("[events] prior error creating topics %v, preventing %s, has cleared up", unprefixedTopics, why.why)
 	}
-	lib.topicsWork.FirstWorkMessage = func(_ context.Context, _ topicsWhy, topic string) {
-		lib.tracer.Logf("done waiting for topic listing to complete (%s needs to be created)", topic)
+	lib.topicsWork.FirstWorkMessage = func(_ context.Context, _ topicsWhy, unprefixedTopic string) {
+		lib.tracer.Logf("done waiting for topic listing to complete (%s needs to be created)", unprefixedTopic)
 	}
-	lib.topicsWork.NotRetryingError = func(ctx context.Context, topic string, why topicsWhy, err error) error {
-		err = errors.Errorf("event library topic (%s) creation failed (%s): %w", topic, why.why, err)
+	lib.topicsWork.NotRetryingError = func(ctx context.Context, unprefixedTopic string, why topicsWhy, err error) error {
+		err = errors.Errorf("event library topic (%s) creation failed (%s): %w", unprefixedTopic, why.why, err)
 		lib.tracer.Logf("[events] %s: %+v", why.why, err)
 		return err
 	}
-	lib.topicsWork.RetryingOrNot = func(ctx context.Context, doCreate bool, topic string, why topicsWhy) {
+	lib.topicsWork.RetryingOrNot = func(ctx context.Context, doCreate bool, unprefixedTopic string, why topicsWhy) {
 		if doCreate {
-			lib.tracer.Logf("[events] %s: will re-attempt creation of topic %s, previous attempt failed", why.why, topic)
+			lib.tracer.Logf("[events] %s: will re-attempt creation of topic %s, previous attempt failed", why.why, unprefixedTopic)
 		} else {
-			lib.tracer.Logf("[events] %s: will NOT re-attempt creation of topic %s yet, previous attempt failed", why.why, topic)
+			lib.tracer.Logf("[events] %s: will NOT re-attempt creation of topic %s yet, previous attempt failed", why.why, unprefixedTopic)
 		}
 	}
-	lib.topicsWork.ItemPreWork = func(ctx context.Context, topic string, why topicsWhy) error {
-		_, ok := lib.getTopicConfig(topic)
-		if lib.mustRegisterTopics && !ok && topic != heartbeatTopic.Topic() {
-			lib.tracer.Logf("[events] %s: requested topic, %s, not pre-registered", why.why, topic)
-			return UnregisteredTopicError.Errorf("event library attempt to create topic (%s) that was not pre-registered (%s)", topic, why.why)
+	lib.topicsWork.ItemPreWork = func(ctx context.Context, unprefixedTopic string, why topicsWhy) error {
+		_, ok := lib.getTopicConfig(unprefixedTopic)
+		if lib.mustRegisterTopics && !ok && unprefixedTopic != heartbeatTopic.Topic() {
+			lib.tracer.Logf("[events] %s: requested topic, %s, not pre-registered", why.why, unprefixedTopic)
+			return UnregisteredTopicError.Errorf("event library attempt to create topic (%s) that was not pre-registered (%s)", unprefixedTopic, why.why)
 		}
 		return nil
 	}
-	lib.topicsWork.ItemWork = func(ctx context.Context, topic string, why topicsWhy) error {
-		tc, _ := lib.getTopicConfig(topic)
-		tc.Topic = topic
+	lib.topicsWork.ItemWork = func(ctx context.Context, unprefixedTopic string, why topicsWhy) error {
+		tc, _ := lib.getTopicConfig(unprefixedTopic)
+		prefixedTopic := lib.addPrefix(unprefixedTopic)
+		tc.Topic = prefixedTopic
 		if tc.NumPartitions == 0 {
 			tc.NumPartitions = defaultNumPartitions
 		}
@@ -182,26 +184,26 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 		mir = getIntConfigValue(tc, "min.insync.replicas")
 		var ctr kafka.CreateTopicsRequest
 		ctr.Topics = append(ctr.Topics, tc)
-		lib.tracer.Logf("[events] %s: attempting creation of topic %s with replicas %d and min.insync %d", why, topic, tc.ReplicationFactor, mir)
+		lib.tracer.Logf("[events] %s: attempting creation of topic %s with replicas %d and min.insync %d", why, prefixedTopic, tc.ReplicationFactor, mir)
 		client, err := lib.getController(ctx)
 		if err == nil {
-			lib.tracer.Logf("[events] %s: making topic creation request for %v", why, topic)
+			lib.tracer.Logf("[events] %s: making topic creation request for %v", why, prefixedTopic)
 			var resp *kafka.CreateTopicsResponse
 			resp, err = client.CreateTopics(ctx, &ctr)
 			if err == nil {
-				err = resp.Errors[topic]
+				err = resp.Errors[prefixedTopic]
 				switch {
 				case err == nil:
-					lib.tracer.Logf("[events] %s: topic %s no error when creating", why, topic)
+					lib.tracer.Logf("[events] %s: topic %s no error when creating", why, prefixedTopic)
 				case errors.Is(err, kafka.TopicAlreadyExists):
-					lib.tracer.Logf("[events] %s: topic %s already exists", why, topic)
+					lib.tracer.Logf("[events] %s: topic %s already exists", why, prefixedTopic)
 					err = nil
 				default:
 					// uh, oh. Handled later
 				}
 				for tpc, topicErr := range resp.Errors {
-					if tpc != topic {
-						lib.tracer.Logf("[event] received create topic response for topic (%s) not in request (%s %s): %s", tpc, why, topic, topicErr)
+					if tpc != prefixedTopic {
+						lib.tracer.Logf("[event] received create topic response for topic (%s) not in request (%s %s): %s", tpc, why, prefixedTopic, topicErr)
 					}
 				}
 			}
@@ -211,31 +213,31 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 		}
 		return err
 	}
-	lib.topicsWork.ItemDone = func(_ context.Context, topic string, why topicsWhy) {
-		lib.tracer.Logf("[events] %s: topic %s should now exist", why.why, topic)
+	lib.topicsWork.ItemDone = func(_ context.Context, unprefixedTopic string, why topicsWhy) {
+		lib.tracer.Logf("[events] %s: topic %s should now exist", why.why, unprefixedTopic)
 	}
-	lib.topicsWork.ItemFailed = func(_ context.Context, topic string, why topicsWhy, err error, primary bool) error {
-		err = errors.Errorf("event library error creating topic (%s) (%s): %w", topic, why.why, err)
+	lib.topicsWork.ItemFailed = func(_ context.Context, unprefixedTopic string, why topicsWhy, err error, primary bool) error {
+		err = errors.Errorf("event library error creating topic (%s) (%s): %w", unprefixedTopic, why.why, err)
 		if primary {
 			err = errors.Alert(err)
 		}
 		lib.tracer.Logf("[events] %+v", err)
 		return err
 	}
-	lib.topicsWork.ItemTimeoutError = func(_ context.Context, topic string, why topicsWhy, _ error) error {
-		return errors.Errorf("event library could not create kafka topic (%s) (%s): %w", topic, why.why, ErrTopicCreationTimeout)
+	lib.topicsWork.ItemTimeoutError = func(_ context.Context, unprefixedTopic string, why topicsWhy, _ error) error {
+		return errors.Errorf("event library could not create kafka topic (%s) (%s): %w", unprefixedTopic, why.why, ErrTopicCreationTimeout)
 	}
-	lib.topicsWork.ItemPending = func(_ context.Context, topic string, why topicsWhy) {
-		lib.tracer.Logf("[events] %s: will wait for creation attempt of topic %s to complete", why.why, topic)
+	lib.topicsWork.ItemPending = func(_ context.Context, unprefixedTopic string, why topicsWhy) {
+		lib.tracer.Logf("[events] %s: will wait for creation attempt of topic %s to complete", why.why, unprefixedTopic)
 	}
-	lib.topicsWork.PreWork = func(ctx context.Context, why topicsWhy, topics []string) error {
+	lib.topicsWork.PreWork = func(ctx context.Context, why topicsWhy, unprefixedTopics []string) error {
 		if lib.ready.Load() == isNotConfigured {
 			err := errors.Alertf("attempt to create topics before library configuration (%s)", why.why)
 			lib.tracer.Logf("[events] %s: %+v", why, err)
 			panic(err)
 		}
-		for _, topic := range topics {
-			if topic == "" {
+		for _, unprefixedTopic := range unprefixedTopics {
+			if unprefixedTopic == "" {
 				err := errors.Errorf("cannot create an empty topic (%s) in event library", why.why)
 				lib.tracer.Logf("[events] %s: %+v", why, err)
 				return err
@@ -276,8 +278,15 @@ func (lib *LibraryNoDB) listAvailableTopics() {
 					continue
 				}
 				seen[p.Topic] = true
-				lib.tracer.Logf("[events] topic %s found in partition", p.Topic)
-				lib.topicsWork.SetDone(p.Topic)
+				unprefixedTopic := lib.RemovePrefix(p.Topic)
+				if lib.prefix != "" && unprefixedTopic == p.Topic {
+					if debugPrefixIgnore {
+						lib.tracer.Logf("[events] topic %s found in partition, IGNORING (not prefixed)", p.Topic)
+					}
+					continue
+				}
+				lib.tracer.Logf("[events] topic %s found in partition", unprefixedTopic)
+				lib.topicsWork.SetDone(unprefixedTopic)
 			}
 			lib.tracer.Logf("[events] done listing existing topics")
 			return
@@ -302,8 +311,8 @@ func (lib *LibraryNoDB) waitForTopicsListing(ctx context.Context) error {
 // created. The set of created topics is in lib.topicsSeen. It is expected that createTopics
 // will be called simultaneously from multiple threads. Its behavior is optimized to do
 // minimal work and to return almost instantly if there are no topics that need creating.
-func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, topics []string) error {
-	return lib.topicsWork.Work(ctx, topics, topicsWhy{
+func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, unprefixedTopics []string) error {
+	return lib.topicsWork.Work(ctx, unprefixedTopics, topicsWhy{
 		why:           why,
 		errorCategory: "createTopics",
 	})
