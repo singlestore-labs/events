@@ -118,6 +118,7 @@ func OrderedTest[
 	topic2 := eventmodels.BindTopicTx[myType, ID, TX, DB](Name(t) + "Topic2")
 
 	lib := events.New[ID, TX, DB]()
+	lib.SkipNotifierSupport()
 	conn.AugmentWithProducer(lib)
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic1.Topic()})
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic2.Topic()})

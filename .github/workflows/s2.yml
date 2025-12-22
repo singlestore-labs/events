@@ -99,6 +99,7 @@ jobs:
         env:
           EVENTS_S2TEST_DSN: "root:test@tcp(127.0.0.1:3306)/eventstest?tls=false&parseTime=true"
           EVENTS_KAFKA_BROKERS: "localhost:9092"
+          # NTEST_BUFFERING: "false"
         run: |
           export EVENTS_DEBUG_NOTIFY="true"
           export EVENTS_DEBUG_PRODUCE="true"
