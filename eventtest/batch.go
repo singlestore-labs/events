@@ -129,6 +129,7 @@ func batchTestCommon[
 	conn DB,
 	brokers Brokers,
 	logPrefix string,
+	libraryPrefix Prefix,
 ) (
 	ntest.T,
 	*events.Library[ID, TX, DB],
@@ -137,18 +138,19 @@ func batchTestCommon[
 	[]eventmodels.ProducingEvent,
 ) {
 	baseT := t
-	t = ntest.ExtraDetailLogger(t, logPrefix)
+	t = ntest.ExtraDetailLogger(t, string(libraryPrefix)+logPrefix)
 
 	consumerGroup := events.NewConsumerGroup(Name(t) + "Topic")
 	lib := events.New[ID, TX, DB]()
 	lib.SkipNotifierSupport()
+	lib.SetPrefix(string(libraryPrefix))
 	if !IsNilDB(conn) {
 		conn.AugmentWithProducer(lib)
 	}
 	topic := eventmodels.BindTopicTx[map[string]string, ID, TX, DB](Name(t) + "Topic")
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
 
-	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, logPrefix+"-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, string(libraryPrefix)+logPrefix+"-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 
 	// Generate test events
 	toSend := make([]eventmodels.ProducingEvent, eventsToSend)
@@ -174,8 +176,9 @@ func BatchDeliveryIdempotentTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
-	t, lib, topic, consumerGroup, events := batchTestCommon(ctx, t, conn, brokers, "BDI")
+	t, lib, topic, consumerGroup, events := batchTestCommon(ctx, t, conn, brokers, "BDI", prefix)
 
 	info, handler := createHandler[ID, TX, DB](t, "idempotent")
 	lib.ConsumeIdempotent(consumerGroup, eventmodels.OnFailureDiscard, Name(t)+"-CI", topic.BatchHandler(handler))
@@ -193,8 +196,9 @@ func BatchDeliveryBroadcastTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
-	t, lib, topic, _, events := batchTestCommon(ctx, t, conn, brokers, "BDB")
+	t, lib, topic, _, events := batchTestCommon(ctx, t, conn, brokers, "BDB", prefix)
 
 	info, handler := createHandler[ID, TX, DB](t, "broadcast")
 	lib.ConsumeBroadcast(Name(t)+"CB", topic.BatchHandler(handler))
@@ -212,11 +216,12 @@ func BatchDeliveryExactlyOnceTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	if IsNilDB(conn) {
 		t.Skipf("%s requires a database", t.Name())
 	}
-	t, lib, topic, consumerGroup, events := batchTestCommon(ctx, t, conn, brokers, "BDEO")
+	t, lib, topic, consumerGroup, events := batchTestCommon(ctx, t, conn, brokers, "BDEO", prefix)
 
 	info, handler := createHandler[ID, TX, DB](t, "exactlyOnce")
 	lib.ConsumeExactlyOnce(consumerGroup, eventmodels.OnFailureDiscard, Name(t)+"-CEO", topic.BatchHandlerTx(
