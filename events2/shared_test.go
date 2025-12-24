@@ -105,6 +105,7 @@ func s2conn(db *sql.DB) *DBType {
 type LibraryType = events.Library[eventmodels.BinaryEventID, *eventdb.ExampleBasicTX, *events2.Connection[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB]]
 
 func TestSharedEventS2(t *testing.T) {
+	t.Log("starting S2 martrix tests")
 	ntest.RunParallelMatrix(ntest.BufferedLogger(t),
 		chain,
 		eventtest.GenerateSharedTestMatrix[eventmodels.BinaryEventID, *eventdb.ExampleBasicTX, *events2.Connection[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB]](),
@@ -113,6 +114,7 @@ func TestSharedEventS2(t *testing.T) {
 
 func TestLockingLockOrDie(t *testing.T) {
 	t.Parallel()
+	t.Log("starting S2 locking test")
 	ntest.RunTest(ntest.BufferedLogger(t), chain, func(
 		t ntest.T,
 		ctx context.Context,
