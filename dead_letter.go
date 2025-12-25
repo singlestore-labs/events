@@ -58,7 +58,7 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(ctx context.Context, co
 	err := lib.precreateTopicsForConsuming(ctx, consumerGroup, preCreate)
 	if err != nil {
 		if e := ctx.Err(); e == nil {
-			lib.tracer.Logf("[events] UNEXPECTED ERROR creating topics for dead letter consumption, not consuming dead letter topics: %+v", err)
+			lib.tracer.Logf(ctx, "[events] UNEXPECTED ERROR creating topics for dead letter consumption, not consuming dead letter topics: %+v", err)
 		}
 		return
 	}
@@ -104,7 +104,7 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(ctx context.Context, co
 		allStarted.Add(1)
 		allDone.Add(1)
 		if debugConsumeStartup {
-			lib.tracer.Logf("[events] Debug: consume startwait +1 for %s", consumerGroup+deadLetterGroupPostfix)
+			lib.tracer.Logf(ctx, "[events] Debug: consume startwait +1 for %s", consumerGroup+deadLetterGroupPostfix)
 		}
 		go lib.startConsumingGroup(ctx, consumerGroup+deadLetterGroupPostfix, dlGroup, limiter, false, allStarted, allDone, true, nil, nil, nil)
 	}
@@ -119,15 +119,15 @@ func (lib *Library[ID, TX, DB]) produceToDeadLetter(ctx context.Context, consume
 		err := lib.writer.WriteMessages(ctx, msg)
 		if err == nil {
 			if failures > 0 {
-				lib.tracer.Logf("[events] finally produced dead letter message (%s/%s) to Kafka after %d failure(s)", msg.Topic, string(msg.Key), failures)
+				lib.tracer.Logf(ctx, "[events] finally produced dead letter message (%s/%s) to Kafka after %d failure(s)", msg.Topic, string(msg.Key), failures)
 			} else {
-				lib.tracer.Logf("[events] produced dead letter message (%s/%s) to Kafka", msg.Topic, string(msg.Key))
+				lib.tracer.Logf(ctx, "[events] produced dead letter message (%s/%s) to Kafka", msg.Topic, string(msg.Key))
 			}
 			DeadLetterProduceCounts.WithLabelValues(handlerName, originalTopic).Inc()
 			return
 		}
 		failures++
-		_ = lib.RecordErrorNoWait("produceEvents", errors.Errorf("cannot produce dead letter message (%s/%s, %d failures) to Kafka: %w", msg.Topic, string(msg.Key), failures, err))
+		_ = lib.RecordErrorNoWait(ctx, "produceEvents", errors.Errorf("cannot produce dead letter message (%s/%s, %d failures) to Kafka: %w", msg.Topic, string(msg.Key), failures, err))
 		if !backoff.Continue(b) {
 			return
 		}

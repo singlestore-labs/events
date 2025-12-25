@@ -12,56 +12,29 @@ import (
 	"github.com/memsql/ntest"
 	"github.com/muir/nject/v2"
 	"github.com/segmentio/kafka-go"
-	"github.com/singlestore-labs/once"
 	"github.com/singlestore-labs/wait"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/events/eventtest/eventtestutil"
 )
 
 // --------- begin section that is duplicated in eventtest/common.go -----------
 
-type T = ntest.T
-
-type Brokers []string
-
-func KafkaBrokers(t T) Brokers {
-	brokers := os.Getenv("EVENTS_KAFKA_BROKERS")
-	if brokers == "" {
-		t.Skip("EVENTS_KAFKA_BROKERS must be set to run this test")
-	}
-	return Brokers(strings.Split(brokers, " "))
-}
-
-var CommonInjectors = nject.Sequence("common",
-	nject.Provide("context", context.Background),
-	nject.Required(nject.Provide("Report-results", func(inner func(), t T) {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Logf("RESULT: %s FAILED w/panic", t.Name())
-				panic(r)
-			}
-			if t.Failed() {
-				t.Logf("RESULT: %s FAILED", t.Name())
-			} else {
-				t.Logf("RESULT: %s PASSED", t.Name())
-			}
-		}()
-		inner()
-	})),
-	nject.Provide("cancel", AutoCancel),
-	nject.Provide("brokers", KafkaBrokers),
+type (
+	T       = ntest.T
+	Cancel  = eventtestutil.Cancel
+	Brokers = eventtestutil.Brokers
 )
 
-type Cancel func()
-
-func AutoCancel(ctx context.Context, t T) (context.Context, Cancel) {
-	ctx, cancel := context.WithCancel(ctx)
-	onlyOnce := once.New(cancel)
-	t.Cleanup(onlyOnce.Do)
-	return ctx, onlyOnce.Do
-}
+var (
+	KafkaBrokers      = eventtestutil.KafkaBrokers
+	CommonInjectors   = eventtestutil.KafkaBrokers
+	AutoCancel        = eventtestutil.AutoCancel
+	ExtraDetailLogger = eventtestutil.ExtraDetailLogger
+	GetTracerConfig   = eventtestutil.GetTracerConfig
+)
 
 // --------- end section that is duplicated in eventtest/common.go -----------
 
@@ -121,9 +94,11 @@ func TestBroadcastGroupRefresh(t *testing.T) {
 		) {
 			baseT := t
 			lib1 := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
-			lib1.Configure(nil, ntest.ExtraDetailLogger(baseT, "BGR-1"), false, SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+			lib1.Configure(nil, ExtraDetailLogger(baseT, "BGR-1"), false, SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+			lib1.SetTracerConfig(GetTracerConfig(baseT))
 			lib2 := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
-			lib2.Configure(nil, ntest.ExtraDetailLogger(baseT, "BGR-2"), false, SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+			lib2.Configure(nil, ExtraDetailLogger(baseT, "BGR-2"), false, SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+			lib2.SetTracerConfig(GetTracerConfig(baseT))
 
 			for try := 1; try <= 10; try++ {
 				t.Log("attempt #%d to reuse the consumer group", try)

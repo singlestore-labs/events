@@ -67,14 +67,14 @@ func handle[E any](ctx context.Context, handlerInfo HandlerInfo, messages []*kaf
 	for i, message := range messages {
 		meta, err := decode[E](message, handlerInfo.ConsumerGroup(), lib, handlerInfo.Name())
 		if err != nil {
-			lib.Tracer().Logf("[events] could not decode (%s) event (%s / %s) for handler (%s / %s): %+v", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
+			lib.Tracer().Logf(ctx, "[events] could not decode (%s) event (%s / %s) for handler (%s / %s): %+v", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
 			errs[i] = err
 			continue
 		}
 		meta.BaseTopic = handlerInfo.BaseTopic()
 		meta.idx = i
 		metas = append(metas, meta)
-		lib.Tracer().Logf("[events] delivering (%s) event (%s / %s) to handler (%s / %s)", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name())
+		lib.Tracer().Logf(ctx, "[events] delivering (%s) event (%s / %s) to handler (%s / %s)", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name())
 	}
 	if len(metas) == 0 {
 		return
@@ -84,7 +84,7 @@ func handle[E any](ctx context.Context, handlerInfo HandlerInfo, messages []*kaf
 		if callbackErr != nil {
 			errs[meta.idx] = errors.Errorf("consume error handling (%s) event (%s / %s) in with handler (%s / %s): %w", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), callbackErr)
 		} else if debugDelivery {
-			lib.Tracer().Logf("[events] success delivering (%s) event (%s / %s) to handler (%s / %s)", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name())
+			lib.Tracer().Logf(ctx, "[events] success delivering (%s) event (%s / %s) to handler (%s / %s)", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name())
 		}
 	}
 	return
@@ -149,7 +149,7 @@ func handleTx[E any, ID AbstractID[ID], TX AbstractTX](ctx context.Context, hand
 	for i, message := range messages {
 		meta, err := decode[E](message, handlerInfo.ConsumerGroup(), lib, handlerInfo.Name())
 		if err != nil {
-			lib.Tracer().Logf("[events] could not decode (%s) tx event (%s / %s) for handler (%s / %s): %+v", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
+			lib.Tracer().Logf(ctx, "[events] could not decode (%s) tx event (%s / %s) for handler (%s / %s): %+v", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
 			errs[i] = err
 			continue
 		}
@@ -166,14 +166,14 @@ func handleTx[E any, ID AbstractID[ID], TX AbstractTX](ctx context.Context, hand
 			if err != nil {
 				if errors.Is(err, ErrAlreadyProcessed) {
 					alreadyDone[i] = true
-					lib.Tracer().Logf("[events] tx (%s) event (%s / %s) for handler (%s / %s) already delivered", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name())
+					lib.Tracer().Logf(ctx, "[events] tx (%s) event (%s / %s) for handler (%s / %s) already delivered", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name())
 					continue
 				}
 				err = errors.WithStack(err)
-				lib.Tracer().Logf("[events] db failure delivering tx (%s) event (%s / %s) to handler (%s / %s): %+v", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
+				lib.Tracer().Logf(ctx, "[events] db failure delivering tx (%s) event (%s / %s) to handler (%s / %s): %+v", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
 				return err
 			}
-			lib.Tracer().Logf("[events] delivering tx (%s) event (%s / %s) to handler (%s / %s)", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name())
+			lib.Tracer().Logf(ctx, "[events] delivering tx (%s) event (%s / %s) to handler (%s / %s)", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name())
 			todo = append(todo, meta)
 		}
 		if len(todo) == 0 {
@@ -187,7 +187,7 @@ func handleTx[E any, ID AbstractID[ID], TX AbstractTX](ctx context.Context, hand
 		}
 		if err != nil {
 			errs[meta.idx] = errors.Errorf("consume error handling (%s) tx event (%s / %s) in with handler (%s / %s): %w", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
-			lib.Tracer().Logf("[events] tx failure delivering tx (%s) event (%s / %s) to handler (%s / %s): %+v", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
+			lib.Tracer().Logf(ctx, "[events] tx failure delivering tx (%s) event (%s / %s) to handler (%s / %s): %+v", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
 		}
 	}
 	return
