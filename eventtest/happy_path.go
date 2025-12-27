@@ -256,12 +256,12 @@ func IdempotentDeliveryTest[
 	}
 
 	t.Log("Register same consumer group across libraries")
-	lib1.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentA"), eventmodels.OnFailureBlock, "Ia1", topic.Handler(mkIdempotentHandler("Ia1")))
-	lib2.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentA"), eventmodels.OnFailureBlock, "Ia2", topic.Handler(mkIdempotentHandler("Ia2")))
+	lib1.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idptnA"), eventmodels.OnFailureBlock, "Ia1", topic.Handler(mkIdempotentHandler("Ia1")))
+	lib2.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idptnA"), eventmodels.OnFailureBlock, "Ia2", topic.Handler(mkIdempotentHandler("Ia2")))
 
 	t.Log("Register in different consumer groups")
-	lib1.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentB"), eventmodels.OnFailureBlock, "Ib1", topic.Handler(mkIdempotentHandler("Ib1")))
-	lib2.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentC"), eventmodels.OnFailureBlock, "Ic1", topic.Handler(mkIdempotentHandler("Ic1")))
+	lib1.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idptnB"), eventmodels.OnFailureBlock, "Ib1", topic.Handler(mkIdempotentHandler("Ib1")))
+	lib2.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idptnC"), eventmodels.OnFailureBlock, "Ic1", topic.Handler(mkIdempotentHandler("Ic1")))
 
 	t.Log("Start consumers and producers")
 
@@ -422,8 +422,8 @@ func ExactlyOnceDeliveryTest[
 	}
 
 	// Same consumer group across libraries
-	lib1.ConsumeExactlyOnce(events.NewConsumerGroup(Name(t)+"-exactlyonce"), eventmodels.OnFailureBlock, "EO1", topic.HandlerTx(mkExactlyOnceHandler("EO1")))
-	lib2.ConsumeExactlyOnce(events.NewConsumerGroup(Name(t)+"-exactlyonce"), eventmodels.OnFailureBlock, "EO2", topic.HandlerTx(mkExactlyOnceHandler("EO2")))
+	lib1.ConsumeExactlyOnce(events.NewConsumerGroup(Name(t)+"-extly1"), eventmodels.OnFailureBlock, "EO1", topic.HandlerTx(mkExactlyOnceHandler("EO1")))
+	lib2.ConsumeExactlyOnce(events.NewConsumerGroup(Name(t)+"-extly1"), eventmodels.OnFailureBlock, "EO2", topic.HandlerTx(mkExactlyOnceHandler("EO2")))
 
 	// Start consumers and producers
 	produceDone, err := lib1.CatchUpProduce(ctx, time.Second*5, 64)
@@ -537,7 +537,7 @@ func CloudEventEncodingTest[
 	topic := eventmodels.BindTopic[myEvent](Name(t) + "Topic")
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
 
-	lib.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idempotentA"), eventmodels.OnFailureBlock, Name(t), topic.Handler(
+	lib.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idptnA"), eventmodels.OnFailureBlock, Name(t), topic.Handler(
 		func(ctx context.Context, e eventmodels.Event[myEvent]) error {
 			lock.Lock()
 			defer lock.Unlock()
@@ -702,7 +702,7 @@ func CloudEventEncodingTest[
 			assert.Equalf(t, id, meta.Subject, "subject msg%d %s", i+1, id)
 			assert.Equalf(t, Name(t)+"Topic", meta.Type, "type msg%d %s", i+1, id)
 			assert.Equalf(t, "1.0", meta.SpecVersion, "specVersion msg%d %s", i+1, id)
-			assert.Equalf(t, Name(t)+"-idempotentA", meta.ConsumerGroup, "consumerGroup msg%d %s", i+1, id)
+			assert.Equalf(t, Name(t)+"-idptnA", meta.ConsumerGroup, "consumerGroup msg%d %s", i+1, id)
 			assert.Equalf(t, Name(t), meta.HandlerName, "handlerName msg%d %s", i+1, id)
 		}
 	}

@@ -2,7 +2,6 @@ package events
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
 	"strconv"
 	"time"
@@ -10,7 +9,6 @@ import (
 	"github.com/memsql/errors"
 	"github.com/segmentio/kafka-go"
 
-	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/singlestore-labs/events/internal/pwork"
 	"github.com/singlestore-labs/generic"
 )
@@ -60,20 +58,6 @@ func (lib *LibraryNoDB) getTopicConfig(unprefixedTopic string) (kafka.TopicConfi
 	defer lib.lock.Unlock()
 	c, ok := lib.topicConfig[unprefixedTopic]
 	return c, ok
-}
-
-func (lib *LibraryNoDB) createTopicsForOutgoingEvents(ctx context.Context, events []eventmodels.ProducingEvent) error {
-	if len(events) == 0 {
-		return nil
-	}
-	topicSet := make(map[string]struct{})
-	for _, event := range events {
-		topicSet[event.GetTopic()] = struct{}{}
-	}
-	return lib.topicsWork.WorkUntilDone(ctx, generic.Keys(topicSet), topicsWhy{
-		why:           fmt.Sprintf("produce %d (eg %s %s)", len(events), events[0].GetTopic(), events[0].GetKey()),
-		errorCategory: "createTopicsForProduce",
-	})
 }
 
 // ValidateTopics will be fast whenever it can be fast. Sometimes it will
