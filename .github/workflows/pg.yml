@@ -74,14 +74,14 @@ jobs:
 
       - name: Go Build Cache
         id: events-build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ steps.go-cache-paths.outputs.go-build }}
           key: ${{ runner.os }}.go-build-${{ hashFiles('**/go.sum') }}-1.22.x
      
       - name: Go Mod Cache
         id: events-mod
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ steps.go-cache-paths.outputs.go-mod }}
           key: ${{ runner.os }}.go-build-${{ hashFiles('**/go.sum') }}-1.22.x
@@ -98,6 +98,7 @@ jobs:
         env:
           EVENTS_POSTGRES_TEST_DSN: "postgres://postgres:postgres@localhost?sslmode=disable"
           EVENTS_KAFKA_BROKERS: "localhost:9092"
+          # NTEST_BUFFERING: "false"
         run: |
           export EVENTS_DEBUG_NOTIFY="true"
           export EVENTS_DEBUG_PRODUCE="true"

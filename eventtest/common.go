@@ -39,9 +39,12 @@ var CommonInjectors = nject.Sequence("common",
 				t.Logf("RESULT: %s FAILED w/panic", t.Name())
 				panic(r)
 			}
-			if t.Failed() {
+			switch {
+			case t.Failed():
 				t.Logf("RESULT: %s FAILED", t.Name())
-			} else {
+			case t.Skipped():
+				t.Logf("RESULT: %s SKIPPED", t.Name())
+			default:
 				t.Logf("RESULT: %s PASSED", t.Name())
 			}
 		}()

@@ -34,6 +34,7 @@ func ErrorWhenMisusedTest[
 	type myEvent map[string]string
 
 	lib := events.New[ID, TX, DB]()
+	lib.SkipNotifierSupport()
 	lib.SetEnhanceDB(true)
 	lib.Configure(conn, t, true, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 
@@ -85,6 +86,7 @@ func ErrorWhenMisusedTest[
 		"immediate with bad topic")
 
 	lib2 := events.New[ID, TX, DB]()
+	lib2.SkipNotifierSupport()
 	lib2.ConsumeIdempotent(events.NewConsumerGroup("consumerGroup"), eventmodels.OnFailureBlock, "handler", goodTopic.Handler(func(_ context.Context, event eventmodels.Event[myEvent]) error {
 		return nil
 	}))

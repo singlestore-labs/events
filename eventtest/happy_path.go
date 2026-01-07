@@ -199,8 +199,10 @@ func IdempotentDeliveryTest[
 
 	lib1 := events.New[ID, TX, DB]()
 	lib1.SetEnhanceDB(true)
+	lib1.SkipNotifierSupport()
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SetEnhanceDB(true)
+	lib2.SkipNotifierSupport()
 
 	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, "TIDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TIDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
@@ -362,8 +364,10 @@ func ExactlyOnceDeliveryTest[
 
 	lib1 := events.New[ID, TX, DB]()
 	lib1.SetEnhanceDB(true)
+	lib1.SkipNotifierSupport()
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SetEnhanceDB(true)
+	lib2.SkipNotifierSupport()
 
 	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, "TEOD-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TEOD-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
@@ -513,6 +517,7 @@ func CloudEventEncodingTest[
 ) {
 	t = ntest.ExtraDetailLogger(t, "TCEE")
 	lib := events.New[ID, TX, DB]()
+	lib.SkipNotifierSupport()
 	var lock sync.Mutex
 
 	type myEvent map[string]string
