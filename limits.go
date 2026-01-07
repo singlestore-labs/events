@@ -75,7 +75,7 @@ func (lib *Library[ID, TX, DB]) prepareToProduce(ctx context.Context, messages [
 			_ = lib.sizeCapWork.WorkUntilDone(ctx, unprefixedTopics, "prefetching size caps")
 		}()
 		if debugLimits {
-			lib.tracer.Logf("limits: no large messages in batch %d (%s %s)", len(messages), messages[0].Topic, string(messages[0].Key))
+			lib.tracer.Logf(ctx, "limits: no large messages in batch %d (%s %s)", len(messages), messages[0].Topic, string(messages[0].Key))
 		}
 		return nil
 	}
@@ -96,7 +96,7 @@ func (lib *Library[ID, TX, DB]) prepareToProduce(ctx context.Context, messages [
 	}
 
 	if debugLimits {
-		lib.tracer.Logf("limits: no violating messages in batch %d (%s %s)", len(messages), messages[0].Topic, string(messages[0].Key))
+		lib.tracer.Logf(ctx, "limits: no violating messages in batch %d (%s %s)", len(messages), messages[0].Topic, string(messages[0].Key))
 	}
 	return nil
 }
@@ -130,9 +130,9 @@ func (lib *LibraryNoDB) sizeCapStartBrokerCaps(ctx context.Context) {
 func (lib *LibraryNoDB) sizeCapLoadBrokerCaps() {
 	ctx := lib.sizeCapBrokerLoadCtx
 	if debugLimits {
-		lib.tracer.Logf("limits: sizeCapLoadBrokerCaps started")
+		lib.tracer.Logf(ctx, "limits: sizeCapLoadBrokerCaps started")
 		defer func() {
-			lib.tracer.Logf("limits: sizeCapLoadBrokerCaps completed")
+			lib.tracer.Logf(ctx, "limits: sizeCapLoadBrokerCaps completed")
 		}()
 	}
 	b := highLimitBackoffPolicy.Start(ctx)
@@ -163,7 +163,7 @@ func (lib *LibraryNoDB) sizeCapLoadBrokerCaps() {
 			return nil
 		}()
 		if err != nil {
-			_ = lib.RecordErrorNoWait("size cap fetch", errors.Errorf("could not fetch client size cap: %w", err))
+			_ = lib.RecordErrorNoWait(ctx, "size cap fetch", errors.Errorf("could not fetch client size cap: %w", err))
 			if backoff.Continue(b) {
 				continue
 			}
@@ -184,19 +184,19 @@ func (lib *LibraryNoDB) sizeCapLoadBrokerCaps() {
 				if v, err := strconv.ParseInt(e.ConfigValue, 10, 64); err == nil {
 					lib.sizeCapBrokerMessageMax.Store(v)
 				} else {
-					lib.tracer.Logf("invalid value in broker config for message.max.bytes: %s: %v", e.ConfigValue, err)
+					lib.tracer.Logf(ctx, "invalid value in broker config for message.max.bytes: %s: %v", e.ConfigValue, err)
 				}
 			}
 			if e.ConfigName == "socket.request.max.bytes" {
 				if v, err := strconv.ParseInt(e.ConfigValue, 10, 64); err == nil {
 					lib.sizeCapSocketRequestMax.Store(v)
 				} else {
-					lib.tracer.Logf("invalid value in broker config for socket.request.max.bytes: %s: %v", e.ConfigValue, err)
+					lib.tracer.Logf(ctx, "invalid value in broker config for socket.request.max.bytes: %s: %v", e.ConfigValue, err)
 				}
 			}
 		}
 	}
-	lib.tracer.Logf("[events] broker size cap limits fetched: message: %d request: %d", lib.sizeCapBrokerMessageMax.Load(), lib.sizeCapSocketRequestMax.Load())
+	lib.tracer.Logf(ctx, "[events] broker size cap limits fetched: message: %d request: %d", lib.sizeCapBrokerMessageMax.Load(), lib.sizeCapSocketRequestMax.Load())
 	lib.sizeCapBrokerLock.Lock()
 	defer lib.sizeCapBrokerLock.Unlock()
 	if lib.sizeCapBrokerState.Load() != sizeCapFetchFinished {
@@ -211,9 +211,9 @@ func (lib *LibraryNoDB) sizeCapWaitForBroker(ctx context.Context) {
 		return
 	}
 	if debugLimits {
-		lib.tracer.Logf("limits: sizeCapWaitForBroker start wait")
+		lib.tracer.Logf(ctx, "limits: sizeCapWaitForBroker start wait")
 		defer func() {
-			lib.tracer.Logf("limits: sizeCapWaitForBroker wait complete")
+			lib.tracer.Logf(ctx, "limits: sizeCapWaitForBroker wait complete")
 		}()
 	}
 	lib.sizeCapStartBrokerCaps(ctx)
@@ -224,29 +224,29 @@ func (lib *LibraryNoDB) sizeCapWaitForBroker(ctx context.Context) {
 }
 
 // sizeCapBrokerEffective returns effective broker cap (0 if unknown).
-func (lib *LibraryNoDB) sizeCapBrokerEffective() int64 {
+func (lib *LibraryNoDB) sizeCapBrokerEffective(ctx context.Context) int64 {
 	if lib.sizeCapBrokerState.Load() != sizeCapFetchFinished {
 		if debugLimits {
-			lib.tracer.Logf("limits: sizeCapBrokerEffective - fetch unfinished, returning 0")
+			lib.tracer.Logf(ctx, "limits: sizeCapBrokerEffective - fetch unfinished, returning 0")
 		}
 		return 0
 	}
 	bm := lib.sizeCapBrokerMessageMax.Load()
 	if bm <= 0 {
 		if debugLimits {
-			lib.tracer.Logf("limits: sizeCapBrokerEffective - max is <= 0, returning 0")
+			lib.tracer.Logf(ctx, "limits: sizeCapBrokerEffective - max is <= 0, returning 0")
 		}
 		return 0
 	}
 	sr := lib.sizeCapSocketRequestMax.Load()
 	if sr > 0 && sr < bm {
 		if debugLimits {
-			lib.tracer.Logf("limits: sizeCapBrokerEffective - broker max: %d, request max: %d -> %d", bm, sr, sr)
+			lib.tracer.Logf(ctx, "limits: sizeCapBrokerEffective - broker max: %d, request max: %d -> %d", bm, sr, sr)
 		}
 		return sr
 	}
 	if debugLimits {
-		lib.tracer.Logf("limits: sizeCapBrokerEffective - broker max: %d, request max: %d -> %d", bm, sr, bm)
+		lib.tracer.Logf(ctx, "limits: sizeCapBrokerEffective - broker max: %d, request max: %d -> %d", bm, sr, bm)
 	}
 	return bm
 }
@@ -256,12 +256,12 @@ func (lib *LibraryNoDB) configureSizeCapPrework() {
 	lib.sizeCapWork.BackoffPolicy = highLimitBackoffPolicy
 	lib.sizeCapWork.WorkDeadline = topicCreationDeadline
 	lib.sizeCapWork.ItemRetryDelay = 5 * time.Second
-	lib.sizeCapWork.ErrorReporter = func(_ context.Context, err error, _ string) {
-		_ = lib.RecordErrorNoWait("sizeCapPerTopic", err)
+	lib.sizeCapWork.ErrorReporter = func(ctx context.Context, err error, _ string) {
+		_ = lib.RecordErrorNoWait(ctx, "sizeCapPerTopic", err)
 	}
 	lib.sizeCapWork.NotRetryingError = func(ctx context.Context, unprefixedTopic string, why string, err error) error {
 		err = errors.Errorf("event library topic (%s) size cap fetch failed (%s): %w", unprefixedTopic, why, err)
-		lib.tracer.Logf("[events] %s: %+v", why, err)
+		lib.tracer.Logf(ctx, "[events] %s: %+v", why, err)
 		return err
 	}
 	lib.sizeCapWork.ItemsWork = func(ctx context.Context, loadList []string, why string) []error {
@@ -290,7 +290,7 @@ func (lib *LibraryNoDB) configureSizeCapPrework() {
 			}
 			result := resp.Resources[i]
 			if result.Error != nil {
-				_ = lib.RecordErrorNoWait("fetchSpecificTopicConfiguration", errors.Errorf("fetch topic (%s) config for size caps: %w", unprefixedTopic, result.Error))
+				_ = lib.RecordErrorNoWait(ctx, "fetchSpecificTopicConfiguration", errors.Errorf("fetch topic (%s) config for size caps: %w", unprefixedTopic, result.Error))
 				errs[i] = errors.WithStack(result.Error)
 				continue
 			}
@@ -306,36 +306,36 @@ func (lib *LibraryNoDB) configureSizeCapPrework() {
 				}
 			}
 			if errs[i] == nil {
-				effective := lib.sizeCapComputeEffective(overrideMax, unprefixedTopic)
+				effective := lib.sizeCapComputeEffective(ctx, overrideMax, unprefixedTopic)
 				lib.sizeCapTopicLimits.Store(unprefixedTopic, sizeCapTopicLimit{
 					overrideMax: overrideMax,
 					effective:   effective,
 				})
-				lib.tracer.Logf("[events] topic %s limit %d", unprefixedTopic, effective)
+				lib.tracer.Logf(ctx, "[events] topic %s limit %d", unprefixedTopic, effective)
 			}
 		}
 		return errs
 	}
-	lib.sizeCapWork.ItemDone = func(_ context.Context, unprefixedTopic string, why string) {
+	lib.sizeCapWork.ItemDone = func(ctx context.Context, unprefixedTopic string, why string) {
 		size, _ := lib.sizeCapTopicLimits.Load(unprefixedTopic)
-		lib.tracer.Logf("[events] %s: topic %s size cap fetched: %d", why, unprefixedTopic, size.effective)
+		lib.tracer.Logf(ctx, "[events] %s: topic %s size cap fetched: %d", why, unprefixedTopic, size.effective)
 	}
-	lib.sizeCapWork.ItemFailed = func(_ context.Context, unprefixedTopic string, why string, err error, primary bool) error {
+	lib.sizeCapWork.ItemFailed = func(ctx context.Context, unprefixedTopic string, why string, err error, primary bool) error {
 		err = errors.Errorf("event library fetching topic size limit (%s) (%s): %w", unprefixedTopic, why, err)
 		if primary {
 			err = errors.Alert(err)
 		}
-		lib.tracer.Logf("[events] %+v", err)
+		lib.tracer.Logf(ctx, "[events] %+v", err)
 		return err
 	}
-	lib.sizeCapWork.ItemPending = func(_ context.Context, unprefixedTopic string, why string) {
-		lib.tracer.Logf("[events] %s: will wait for size cap fetch of topic %s to complete", why, unprefixedTopic)
+	lib.sizeCapWork.ItemPending = func(ctx context.Context, unprefixedTopic string, why string) {
+		lib.tracer.Logf(ctx, "[events] %s: will wait for size cap fetch of topic %s to complete", why, unprefixedTopic)
 	}
 }
 
 // sizeCapComputeEffective derives final topic specific limit from override, broker, writer.
-func (lib *LibraryNoDB) sizeCapComputeEffective(overrideMax int64, unprefixedTopic string) int64 {
-	broker := lib.sizeCapBrokerEffective()
+func (lib *LibraryNoDB) sizeCapComputeEffective(ctx context.Context, overrideMax int64, unprefixedTopic string) int64 {
+	broker := lib.sizeCapBrokerEffective(ctx)
 	var effective int64
 	if overrideMax > 0 && broker > 0 {
 		if overrideMax < broker {
@@ -349,7 +349,7 @@ func (lib *LibraryNoDB) sizeCapComputeEffective(overrideMax int64, unprefixedTop
 		effective = broker
 	}
 	if debugLimits {
-		lib.tracer.Logf("limits: topic %s: broker %d override max %d -> %d",
+		lib.tracer.Logf(ctx, "limits: topic %s: broker %d override max %d -> %d",
 			unprefixedTopic, broker, overrideMax, effective)
 	}
 	return effective

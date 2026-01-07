@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/memsql/errors"
+	"github.com/segmentio/kafka-go"
 )
 
 // The DB layers are complex. The challenge is that there are low-level things
@@ -54,8 +55,8 @@ type Producer[ID AbstractID[ID], TX AbstractTX] interface {
 	// ProduceFromTable should be called by transaction wappers. It will
 	// send ids to a central thread that will in turn call ProduceSpecificTxEvents.
 	ProduceFromTable(ctx context.Context, eventIDs map[string][]ID) error
-	RecordError(string, error) error       // pauses to avoid spamming
-	RecordErrorNoWait(string, error) error // does not pause
+	RecordError(context.Context, string, error) error       // pauses to avoid spamming
+	RecordErrorNoWait(context.Context, string, error) error // does not pause
 	IsConfigured() bool
 	Tracer() Tracer
 	ValidateTopics(context.Context, []string) error
@@ -65,8 +66,23 @@ type CanValidateTopics interface {
 	ValidateTopics(context.Context, []string) error
 }
 
+// TracerConfig is how tracing becomes richer. All fields are optional. Additional fields may be
+// added in the future. BeginSpan/DoneSpan will wrap many things. The returned funcs are for
+// noting the end of the span/handle/thread etc.
+type TracerConfig struct {
+	BeginSpan        func(context.Context, map[string]string) (context.Context, func())           // start of a span. All logs are inside spans.
+	Handle           func(context.Context, bool, string, kafka.Message) (context.Context, func()) // string is the handler name, bool is true for deadletter delivery
+	Produce          func(context.Context, kafka.Message) (context.Context, func())               // for logging related to producing the message
+	ProduceFromTable func(context.Context) (context.Context, func())
+	PreStart         func(context.Context) (context.Context, func())         // logging up until start consume or background produce
+	ConsumeStartup   func(context.Context) (context.Context, func())         // includes pre-creating topics
+	BackgroundThread func(context.Context, string) (context.Context, func()) // background thread
+}
+
+// Tracer is a minimal logger with the possibility of structure. TracerConfig
+// (apply with SetTracerConfig) makes it richer.
 type Tracer interface {
-	Logf(string, ...any)
+	Logf(context.Context, string, ...any)
 }
 
 type AbstractTX interface {

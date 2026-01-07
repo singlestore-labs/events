@@ -29,16 +29,16 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 		defer func() {
 			for _, event := range events {
 				if err != nil {
-					lib.tracer.Logf("[events] failed produce %s / %s: %s", event.GetTopic(), event.GetKey(), err)
+					lib.tracer.Logf(ctx, "[events] failed produce %s / %s: %s", event.GetTopic(), event.GetKey(), err)
 				} else {
-					lib.tracer.Logf("[events] produced %s / %s", event.GetTopic(), event.GetKey())
+					lib.tracer.Logf(ctx, "[events] produced %s / %s", event.GetTopic(), event.GetKey())
 				}
 			}
 		}()
 	}
-	err = lib.start("produce events (%d)", len(events))
+	err = lib.start(ctx, "produce events (%d)", len(events))
 	if err != nil {
-		return lib.RecordError("produceNotReady", err)
+		return lib.RecordError(ctx, "produceNotReady", err)
 	}
 
 	messages := make([]kafka.Message, len(events))
@@ -59,7 +59,7 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 			messages[i].Value, err = json.Marshal(event)
 		}
 		if err != nil {
-			return lib.RecordErrorNoWait("marshalEvents", errors.Errorf("cannot marshal event (%T %s) to produce in topic (%s): %w", event, string(messages[i].Key), messages[i].Topic, err))
+			return lib.RecordErrorNoWait(ctx, "marshalEvents", errors.Errorf("cannot marshal event (%T %s) to produce in topic (%s): %w", event, string(messages[i].Key), messages[i].Topic, err))
 		}
 		messages[i].Headers = make([]kafka.Header, 0, len(event.GetHeaders())) // most of the time there is only one value per key
 		var seenContentType bool
@@ -84,16 +84,16 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 
 	err = lib.prepareToProduce(ctx, messages)
 	if err != nil {
-		return lib.RecordErrorNoWait("createTopics", errors.Errorf("unable (%s) to produce (%d) events: %w", events[0].GetTopic(), len(events), err))
+		return lib.RecordErrorNoWait(ctx, "createTopics", errors.Errorf("unable (%s) to produce (%d) events: %w", events[0].GetTopic(), len(events), err))
 	}
 
 	err = lib.writer.WriteMessages(ctx, messages...)
 	if err != nil {
 		if errors.Is(err, kafka.UnknownTopicOrPartition) {
-			lib.tracer.Logf("[events] got an unknown topic or partition error when writing %d message(s) that have known good topics. Retrying with transactional fallback...", len(messages))
+			lib.tracer.Logf(ctx, "[events] got an unknown topic or partition error when writing %d message(s) that have known good topics. Retrying with transactional fallback...", len(messages))
 			return lib.transactionalFallbackWrite(ctx, messages)
 		}
-		return lib.RecordErrorNoWait("produceEvents", errors.Errorf("cannot produce messages (%d, example topic %s) to Kafka: %w", len(messages), messages[0].Topic, err))
+		return lib.RecordErrorNoWait(ctx, "produceEvents", errors.Errorf("cannot produce messages (%d, example topic %s) to Kafka: %w", len(messages), messages[0].Topic, err))
 	}
 	return nil
 }
@@ -117,23 +117,23 @@ func (lib *Library[ID, TX, DB]) transactionalFallbackWrite(ctx context.Context, 
 		topics = append(topics, topic)
 	}
 
-	lib.tracer.Logf("[events] attempting transactional fallback for %d messages across topics %v", len(messages), topics)
+	lib.tracer.Logf(ctx, "[events] attempting transactional fallback for %d messages across topics %v", len(messages), topics)
 
 	// Try each broker in sequence
 	for _, i := range rand.Perm(len(lib.brokers)) {
 		broker := lib.brokers[i]
-		lib.tracer.Logf("[events] trying transactional write to broker %d/%d: %s", i+1, len(lib.brokers), broker)
+		lib.tracer.Logf(ctx, "[events] trying transactional write to broker %d/%d: %s", i+1, len(lib.brokers), broker)
 
 		err := lib.tryTransactionalWriteWithBroker(ctx, broker, messages)
 		if err == nil {
-			lib.tracer.Logf("[events] transactional fallback completed successfully with broker %s", broker)
+			lib.tracer.Logf(ctx, "[events] transactional fallback completed successfully with broker %s", broker)
 			return nil
 		}
 
-		lib.tracer.Logf("[events] transactional write failed with broker %s: %v", broker, err)
+		lib.tracer.Logf(ctx, "[events] transactional write failed with broker %s: %v", broker, err)
 	}
 
-	lib.tracer.Logf("[events] transactional fallback failed on all %d brokers", len(lib.brokers))
+	lib.tracer.Logf(ctx, "[events] transactional fallback failed on all %d brokers", len(lib.brokers))
 	return errors.Errorf("transactional fallback failed on all %d brokers", len(lib.brokers))
 }
 
@@ -142,7 +142,7 @@ func (lib *Library[ID, TX, DB]) tryTransactionalWriteWithBroker(ctx context.Cont
 	// Create unique transaction ID for this attempt
 	txID := fmt.Sprintf("fallback-tx-%d-%d", os.Getpid(), time.Now().UnixNano())
 
-	lib.tracer.Logf("[events] creating transactional writer for broker %s with transaction ID %s", broker, txID)
+	lib.tracer.Logf(ctx, "[events] creating transactional writer for broker %s with transaction ID %s", broker, txID)
 
 	// Create a transactional writer for this specific broker
 	writer := &kafka.Writer{
@@ -158,7 +158,7 @@ func (lib *Library[ID, TX, DB]) tryTransactionalWriteWithBroker(ctx context.Cont
 	ctx, cancel := context.WithTimeout(ctx, transactionalOperationTimeout)
 	defer cancel()
 
-	lib.tracer.Logf("[events] writing %d messages transactionally to broker %s", len(messages), broker)
+	lib.tracer.Logf(ctx, "[events] writing %d messages transactionally to broker %s", len(messages), broker)
 
 	// Write messages - the writer handles the transaction lifecycle
 	err := writer.WriteMessages(ctx, messages...)
@@ -174,7 +174,7 @@ func (lib *Library[ID, TX, DB]) tryTransactionalWriteWithBroker(ctx context.Cont
 		return errors.Errorf("failed to close writer for broker %s: %w", broker, err)
 	}
 
-	lib.tracer.Logf("[events] successfully wrote %d fallback transactional messages to broker %s", len(messages), broker)
+	lib.tracer.Logf(ctx, "[events] successfully wrote %d fallback transactional messages to broker %s", len(messages), broker)
 
 	return nil
 }
@@ -186,9 +186,9 @@ func (lib *Library[ID, TX, DB]) tryTransactionalWriteWithBroker(ctx context.Cont
 //
 // ProduceFromTable can only be used after Configure.
 func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventsByTopic map[string][]ID) error {
-	err := lib.start("produce events from table")
+	err := lib.start(ctx, "produce events from table")
 	if err != nil {
-		return lib.RecordError("produceNotReady", err)
+		return lib.RecordError(ctx, "produceNotReady", err)
 	}
 	if len(eventsByTopic) == 0 {
 		return nil
@@ -217,7 +217,7 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventsByTo
 			// the channel is full, we're going to let CatchUpProduce
 			// handle it
 			if debugProduce {
-				lib.tracer.Logf("[events] debug: produce from table channel is full")
+				lib.tracer.Logf(ctx, "[events] debug: produce from table channel is full")
 			}
 			ProduceFromTxSplit.WithLabelValues("catch-up").Inc()
 			return nil
@@ -230,7 +230,7 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventsByTo
 		return errors.Errorf("cannot produce from table with nil db")
 	}
 	if debugProduce {
-		lib.tracer.Logf("[events] debug: produceFromTable producing synchronously because no producer is running")
+		lib.tracer.Logf(ctx, "[events] debug: produceFromTable producing synchronously because no producer is running")
 	}
 	ProduceFromTxSplit.WithLabelValues("sync").Inc()
 	_ = lib.ProduceSyncCount.Add(uint64(len(eventIDs)))
@@ -246,7 +246,7 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventsByTo
 // CatchUpProduce can only be used after Configure.
 func (lib *Library[ID, TX, DB]) CatchUpProduce(ctx context.Context, sleepTime time.Duration, batchSize int) (chan struct{}, error) {
 	done := make(chan struct{})
-	err := lib.start("catch up produce")
+	err := lib.start(ctx, "catch up produce")
 	if err != nil {
 		close(done)
 		return done, err
@@ -255,7 +255,7 @@ func (lib *Library[ID, TX, DB]) CatchUpProduce(ctx context.Context, sleepTime ti
 		close(done)
 		return done, errors.Alertf("attempt to produce dropped events in library that does not embed a database")
 	}
-	lib.tracer.Logf("[events] Catch-up background producer started")
+	lib.tracer.Logf(ctx, "[events] Catch-up background producer started")
 	_ = lib.producerRunning.Add(1)
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -264,9 +264,9 @@ func (lib *Library[ID, TX, DB]) CatchUpProduce(ctx context.Context, sleepTime ti
 		send := func(ids []ID, tcount int) {
 			count, err := lib.db.ProduceSpecificTxEvents(ctx, ids)
 			if err == nil || errors.Is(err, sql.ErrNoRows) {
-				lib.tracer.Logf("[events] background producer sent %d out of %d events for %d transactions", count, len(ids), tcount)
+				lib.tracer.Logf(ctx, "[events] background producer sent %d out of %d events for %d transactions", count, len(ids), tcount)
 			} else {
-				_ = lib.RecordError("produceTxEvents", err)
+				_ = lib.RecordError(ctx, "produceTxEvents", err)
 			}
 		}
 		ids := make([]ID, 0, batchSize*2)
@@ -316,7 +316,7 @@ func (lib *Library[ID, TX, DB]) CatchUpProduce(ctx context.Context, sleepTime ti
 		for {
 			_, err := lib.db.ProduceDroppedTxEvents(ctx, batchSize)
 			if err != nil {
-				_ = lib.RecordErrorNoWait("produceTxEvents", errors.Errorf("cannot produce dropped tx events: %w", err))
+				_ = lib.RecordErrorNoWait(ctx, "produceTxEvents", errors.Errorf("cannot produce dropped tx events: %w", err))
 			}
 			timer.Reset(sleepTime)
 			select {

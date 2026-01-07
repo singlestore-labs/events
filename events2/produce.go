@@ -176,7 +176,6 @@ func LockOrError[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](
 				FROM	eventLocks
 				WHERE	lockName = ?
 				FOR UPDATE`, lockString).Scan(&ignored)
-
 			if err != nil {
 				ereturn <- err
 				return err
@@ -227,10 +226,10 @@ func ProduceDroppedTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransac
 			}
 			return totalCount, nil
 		case err != nil:
-			_ = producer.RecordError("produceStoredEvents", err)
+			_ = producer.RecordError(ctx, "produceStoredEvents", err)
 			return totalCount, err
 		default:
-			tracer.Logf("[events] Catch-up background producer sent %d events", count)
+			tracer.Logf(ctx, "[events] Catch-up background producer sent %d events", count)
 			if count == 0 {
 				return totalCount, nil
 			}
@@ -392,7 +391,7 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer e
 		ib = ib.Values(id, i+1, event.GetTopic(), event.GetTimestamp().UTC().Format("2006-01-02 15:04:05.000000"), event.GetKey(), enc, headersEnc)
 	}
 	if tracer != nil {
-		tracer.Logf("[events] saving %d events as part of a transaction, example topic: '%s'", len(events), events[0].GetTopic())
+		tracer.Logf(ctx, "[events] saving %d events as part of a transaction, example topic: '%s'", len(events), events[0].GetTopic())
 	}
 	sql, args, err := ib.PlaceholderFormat(sq.Question).ToSql()
 	if err != nil {
@@ -400,7 +399,7 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer e
 	}
 	_, err = tx.ExecContext(ctx, sql, args...)
 	if err != nil {
-		tracer.Logf("[SaveEventsInsideTx] could not insert event: %s: %s", sql, err)
+		tracer.Logf(ctx, "[SaveEventsInsideTx] could not insert event: %s: %s", sql, err)
 		return nil, errors.WithStack(err)
 	}
 	return ids, nil

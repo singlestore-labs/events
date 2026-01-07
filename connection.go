@@ -110,8 +110,9 @@ type LibraryNoDB struct {
 
 	// Per-topic limits map (separate from creatingTopic). Keys are topic names.
 
-	hasDB                     atomic.Bool
 	tracer                    eventmodels.Tracer
+	tracerConfig              eventmodels.TracerConfig
+	hasDB                     atomic.Bool
 	brokers                   []string
 	writer                    *kafka.Writer
 	readers                   map[consumerGroupName]*group
@@ -257,6 +258,7 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 			sizeCapBrokerLoadCtx:     multi.New(),
 		},
 	}
+	lib.SetTracerConfig(eventmodels.TracerConfig{})
 	lib.configureTopicsPrework()
 	lib.configureSizeCapPrework()
 	return &lib
@@ -339,6 +341,39 @@ func (lib *Library[ID, TX, DB]) SetSizeCapLowerLimit(sizeCapDefaultAssumed int64
 	lib.sizeCapDefaultAssumed = sizeCapDefaultAssumed
 }
 
+// SetTracerConfig configures tracer behavior.  Any blank value will default to
+// doing nothing
+func (lib *Library[ID, TX, DB]) SetTracerConfig(config eventmodels.TracerConfig) {
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	lib.tracerConfig = config
+	n := func() {}
+	if lib.tracerConfig.BeginSpan == nil {
+		lib.tracerConfig.BeginSpan = func(ctx context.Context, _ map[string]string) (context.Context, func()) { return ctx, n }
+	}
+	if lib.tracerConfig.Handle == nil {
+		lib.tracerConfig.Handle = func(ctx context.Context, _ bool, _ string, _ kafka.Message) (context.Context, func()) { return ctx, n }
+	}
+	if lib.tracerConfig.Produce == nil {
+		lib.tracerConfig.Produce = func(ctx context.Context, _ kafka.Message) (context.Context, func()) { return ctx, n }
+	}
+	if lib.tracerConfig.ProduceFromTable == nil {
+		lib.tracerConfig.ProduceFromTable = func(ctx context.Context) (context.Context, func()) { return ctx, n }
+	}
+	if lib.tracerConfig.ConsumeStartup == nil {
+		lib.tracerConfig.ConsumeStartup = func(ctx context.Context) (context.Context, func()) { return ctx, n }
+	}
+	if lib.tracerConfig.BackgroundThread == nil {
+		lib.tracerConfig.BackgroundThread = func(ctx context.Context, _ string) (context.Context, func()) { return ctx, n }
+	}
+}
+
+type degenerateTracer struct{}
+
+func (degenerateTracer) Logf(_ context.Context, format string, a ...any) {
+	log.Printf(format, a...)
+}
+
 // Configure sets up the Library so that it has the configuration it needs to run.
 // The database connection is optional. Without it, certain features will always error:
 //
@@ -352,6 +387,10 @@ func (lib *Library[ID, TX, DB]) Configure(conn DB, tracer eventmodels.Tracer, mu
 	}
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
+	if tracer == nil {
+		tracer = degenerateTracer{}
+	}
+	lib.tracer = tracer
 	lib.mustNotBeRunning("attempt configure event library that is already processing")
 	lib.ready.Store(isConfigured)
 	if !internal.IsNil(conn) {
@@ -364,21 +403,24 @@ func (lib *Library[ID, TX, DB]) Configure(conn DB, tracer eventmodels.Tracer, mu
 	lib.brokers = brokers
 	if saslMechanism != nil {
 		lib.mechanism = saslMechanism
-		if tracer != nil {
-			tracer.Logf("[events] configured with SASL %T", saslMechanism)
-		}
 	}
 	if tlsConfig != nil {
 		lib.tlsConfig = tlsConfig.Config
-		if tracer != nil {
-			tracer.Logf("[events] configured with TLS override")
-		}
 	}
 	lib.tracer = tracer
 	lib.mustRegisterTopics = mustRegisterTopics
 }
 
-func (lib *Library[ID, TX, DB]) start(str string, args ...any) error {
+func (lib *Library[ID, TX, DB]) start(ctx context.Context, str string, args ...any) (err error) {
+	defer func() {
+		// in defer so it doesn't hold the lock
+		if lib.mechanism != nil {
+			lib.tracer.Logf(ctx, "[events] configured with SASL %T", lib.mechanism)
+		}
+		if lib.tlsConfig != nil {
+			lib.tracer.Logf(ctx, "[events] configured with TLS override")
+		}
+	}()
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
 	switch lib.ready.Load() {
@@ -531,12 +573,12 @@ func WithQueueDepthLimit(n int) HandlerOpt {
 		r.queueLimit = n
 		r.limit = simultaneous.New[eventLimiterType](n).SetForeverMessaging(
 			limiterStuckMessageAfter,
-			func() {
-				lib.tracer.Logf("[events] Handler %s in consumer group %s for topic %s has been waiting for more than %s for a chance to run and is stuck",
+			func(ctx context.Context) {
+				lib.tracer.Logf(ctx, "[events] Handler %s in consumer group %s for topic %s has been waiting for more than %s for a chance to run and is stuck",
 					r.name, r.consumerGroup, r.handler.GetTopic(), limiterStuckMessageAfter)
 			},
-			func() {
-				lib.tracer.Logf("[events] Handler %s in consumer group %s for topic %s is no longer stuck",
+			func(ctx context.Context) {
+				lib.tracer.Logf(ctx, "[events] Handler %s in consumer group %s for topic %s is no longer stuck",
 					r.name, r.consumerGroup, r.handler.GetTopic())
 			},
 		)
@@ -633,18 +675,14 @@ func (h *registeredHandler) Name() string          { return h.name }
 func (h *registeredHandler) BaseTopic() string     { return h.baseTopic }
 func (h *registeredHandler) ConsumerGroup() string { return h.consumerGroup.String() }
 
-func (lib *LibraryNoDB) RecordErrorNoWait(category string, err error) error {
+func (lib *LibraryNoDB) RecordErrorNoWait(ctx context.Context, category string, err error) error {
 	ErrorCounts.WithLabelValues(category).Inc()
-	if lib.tracer != nil {
-		lib.tracer.Logf("[events] %s error: %+v", category, err)
-	} else {
-		log.Printf("[events] %s error: %+v", category, err)
-	}
+	lib.tracer.Logf(ctx, "[events] %s error: %+v", category, err)
 	return errors.Alertf("events error %s: %w", category, err)
 }
 
-func (lib *LibraryNoDB) RecordError(category string, err error) error {
-	err = lib.RecordErrorNoWait(category, err)
+func (lib *LibraryNoDB) RecordError(ctx context.Context, category string, err error) error {
+	err = lib.RecordErrorNoWait(ctx, category, err)
 	time.Sleep(errorSleep)
 	return err
 }
@@ -691,7 +729,7 @@ func (lib *LibraryNoDB) findABroker(ctx context.Context, f func(*kafka.Conn) err
 		broker := lib.brokers[i]
 		conn, err := dialer.DialContext(ctx, "tcp", broker)
 		if err != nil {
-			lib.tracer.Logf("[events] could not connect to broker %d (of %d) %s: %v", i+1, len(lib.brokers), broker, err)
+			lib.tracer.Logf(ctx, "[events] could not connect to broker %d (of %d) %s: %v", i+1, len(lib.brokers), broker, err)
 			if tried == len(lib.brokers) {
 				// last broker, give up
 				return errors.Errorf("event library dial kafka broker (%s): %w", broker, err)

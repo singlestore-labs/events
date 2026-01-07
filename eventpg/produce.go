@@ -158,7 +158,7 @@ func ProduceDroppedTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransac
 			}
 			return totalCount, nil
 		case err != nil:
-			_ = producer.RecordError("produceStoredEvents", err)
+			_ = producer.RecordError(ctx, "produceStoredEvents", err)
 			return totalCount, err
 		default:
 			producer.Tracer().Logf("[events] Catch-up background producer sent %d events", count)
@@ -310,7 +310,7 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer e
 		ib = ib.Values(id, i+1, topic, event.GetTimestamp().UTC(), event.GetKey(), enc, headersEnc)
 	}
 	if tracer != nil {
-		tracer.Logf("[events] saving %d events as part of a transaction, example topic: '%s'", len(events), events[0].GetTopic())
+		tracer.Logf(ctx, "[events] saving %d events as part of a transaction, example topic: '%s'", len(events), events[0].GetTopic())
 	}
 	sql, args, err := ib.PlaceholderFormat(sq.Dollar).ToSql()
 	if err != nil {
@@ -318,7 +318,7 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer e
 	}
 	_, err = tx.ExecContext(ctx, sql, args...)
 	if err != nil {
-		tracer.Logf("[SaveEventsInsideTx] could not insert event: %s: %s", sql, err)
+		tracer.Logf(ctx, "[SaveEventsInsideTx] could not insert event: %s: %s", sql, err)
 		return nil, errors.WithStack(err)
 	}
 	return ids, nil
