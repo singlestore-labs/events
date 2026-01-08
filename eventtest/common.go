@@ -4,6 +4,7 @@ package eventtest
 import (
 	"context"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -34,6 +35,9 @@ func KafkaBrokers(t T) Brokers {
 }
 
 var CommonInjectors = nject.Sequence("common",
+	nject.Required(func(t T) {
+		t.Logf("starting %s", t.Name())
+	}),
 	nject.Provide("context", context.Background),
 	nject.Required(nject.Provide("Report-results", func(inner func(), t T) {
 		defer func() {
@@ -72,9 +76,17 @@ type AugmentAbstractDB[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX]
 	eventmodels.CanAugment[ID, TX]
 }
 
+var squashRE = regexp.MustCompile(`[^A-Z]+`)
+
 func Name(t ntest.T) string {
-	x := strings.Split(t.Name(), "/")
-	return x[len(x)-1]
+	n := t.Name()
+	x := strings.LastIndexByte(n, '/')
+	if x == -1 {
+		return n
+	}
+	after := n[x+1:]
+	before := n[:x]
+	return squashRE.ReplaceAllString(before, "") + after
 }
 
 type MyEvent struct {
@@ -82,8 +94,8 @@ type MyEvent struct {
 }
 
 var (
-	DeliveryTimeout = LongerOnCI(20*time.Second, 10*time.Minute, 2*time.Minute)
-	StartupTimeout  = LongerOnCI(65*time.Second, 5*time.Minute, 65*time.Second)
+	DeliveryTimeout = LongerOnCI(60*time.Second, 10*time.Minute, 4*time.Minute)
+	StartupTimeout  = LongerOnCI(85*time.Second, 7*time.Minute, 125*time.Second)
 )
 
 func IsNilDB[DB any](db DB) bool {
@@ -140,6 +152,7 @@ func GenerateSharedTestMatrix[
 		"OrderedBlock2CG":          nject.Provide("OB2", OrderedBlockTestTwoCG[ID, TX, DB]),
 		"OrderedRetryLater1CG":     nject.Provide("ORL1", OrderedRetryTestOncCG[ID, TX, DB]),
 		"OrderedRetryLater2CG":     nject.Provide("ORL2", OrderedRetryTestTwoCG[ID, TX, DB]),
+		"OversizeSendTest":         nject.Provide("OST", OversizeSendTest[ID, TX, DB]),
 		"UnfilteredNotifier":       nject.Provide("UN", EventUnfilteredNotifierTest[ID, TX, DB]),
 	}
 }

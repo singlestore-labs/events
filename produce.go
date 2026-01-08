@@ -41,11 +41,6 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 		return lib.RecordError("produceNotReady", err)
 	}
 
-	err = lib.createTopicsForOutgoingEvents(ctx, events)
-	if err != nil {
-		return lib.RecordErrorNoWait("createTopics", errors.Errorf("unable to create topic(s) (%s) to produce (%d) events: %w", events[0].GetTopic(), len(events), err))
-	}
-
 	messages := make([]kafka.Message, len(events))
 	for i, event := range events {
 		topic := event.GetTopic()
@@ -86,6 +81,12 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 			})
 		}
 	}
+
+	err = lib.prepareToProduce(ctx, messages)
+	if err != nil {
+		return lib.RecordErrorNoWait("createTopics", errors.Errorf("unable (%s) to produce (%d) events: %w", events[0].GetTopic(), len(events), err))
+	}
+
 	err = lib.writer.WriteMessages(ctx, messages...)
 	if err != nil {
 		if errors.Is(err, kafka.UnknownTopicOrPartition) {
