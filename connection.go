@@ -249,6 +249,9 @@ func (lib *Library[ID, TX, DB]) SetEnhanceDB(enhance bool) {
 	lib.doEnhance = enhance
 }
 
+// SetBroadcastConsumerBaseName sets the base consumer group name used for
+// creating broadcast consumers.  A dash (-) and number will be appended.
+// Calling this after consumers have started or messages are being produced will panic.
 func (lib *Library[ID, TX, DB]) SetBroadcastConsumerBaseName(name string) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
@@ -256,6 +259,11 @@ func (lib *Library[ID, TX, DB]) SetBroadcastConsumerBaseName(name string) {
 	lib.broadcastConsumerBaseName = name
 }
 
+// SetBroadcastConsumerMaxLocks sets a limit on the maximum number used to form
+// consumer group IDs for creating broadcast consumers. Defaults to 200. Keep this
+// reasonably small so that Kafka doesn't end up thrashing if broadcast consumers
+// cannot be allocated.
+// Calling this after consumers have started or messages are being produced will panic.
 func (lib *Library[ID, TX, DB]) SetBroadcastConsumerMaxLocks(max uint32) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
@@ -267,6 +275,8 @@ func (lib *Library[ID, TX, DB]) SetBroadcastConsumerMaxLocks(max uint32) {
 // short since max topic length is :
 //
 //	249 - 55 (maxConsumerGroupLength) - len("-dead-letter") - len(prefix) - 1
+//
+// Calling this after consumers have started or messages are being produced will panic.
 func (lib *Library[ID, TX, DB]) SetPrefix(prefix string) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
@@ -284,6 +294,8 @@ func (lib *Library[ID, TX, DB]) SetPrefix(prefix string) {
 // locks: they'll use different namespace prefixes unless you mess that up by
 // using SetBroadcastConsumerBaseName() with the same name for both lock-free and locked
 // instances.
+//
+// Calling this after consumers have started or messages are being produced will panic.
 func (lib *Library[ID, TX, DB]) DoNotLockBroadcastConsumerNumbers() {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
@@ -295,6 +307,8 @@ func (lib *Library[ID, TX, DB]) DoNotLockBroadcastConsumerNumbers() {
 // the [Library] doesn't have a running producer. Defaults to false. If true, the
 // event will be left in the database for some other [Library] to pick up sometime
 // in the future.
+//
+// Calling this after consumers have started or messages are being produced will panic.
 func (lib *Library[ID, TX, DB]) SetLazyTxProduce(lazy bool) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
@@ -304,6 +318,8 @@ func (lib *Library[ID, TX, DB]) SetLazyTxProduce(lazy bool) {
 
 // SkipNotifierSupport turns off support for runtime subscription to broadcast topics
 // via RegisterFiltered and RegisterUnfiltered. This is mostly used in testing the events library.
+//
+// Calling this after consumers have started or messages are being produced will panic.
 func (lib *Library[ID, TX, DB]) SkipNotifierSupport() {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
@@ -318,6 +334,10 @@ func (lib *Library[ID, TX, DB]) SkipNotifierSupport() {
 //	StartConsuming requires a database if ConsumeExactlyOnce has been called
 //
 // The conn parameter may be nil, in which case CatchUpProduce() and ProduceFromTable() will error.
+//
+// It is required that Configure be called exactly once before any consumers are started or
+// messages are produced.
+// Calling this after consumers have started or messages are being produced will panic.
 func (lib *Library[ID, TX, DB]) Configure(conn DB, tracer eventmodels.Tracer, mustRegisterTopics bool, saslMechanism sasl.Mechanism, tlsConfig *TLSConfig, brokers []string) {
 	if !lib.skipNotifier {
 		processRegistrationTodo(lib) // before taking lock to avoid deadlock
@@ -396,7 +416,7 @@ func (lib *Library[ID, TX, DB]) BroadcastConsumerLastLatency() (lastGap time.Dur
 // all handler instances for that consumerGroupName (messages will only be delivered successfully
 // once per consumer group)
 func (lib *Library[ID, TX, DB]) ConsumeExactlyOnce(consumerGroup ConsumerGroupName, onFailure eventmodels.OnFailure, handlerName string, handler eventmodels.HandlerTxInterface[ID, TX], opts ...HandlerOpt) {
-	handler.SetLibrary(lib)
+	handler.SetLibrary(libraryInterface[ID, TX, DB]{lib})
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
 	lib.mustNotBeRunning("attempt configure event consumer in library that is already processing")
@@ -417,7 +437,7 @@ func (lib *Library[ID, TX, DB]) ConsumeExactlyOnce(consumerGroup ConsumerGroupNa
 // and one of them returns error, then the message can be re-delivered to the handlers that did not
 // return error.
 func (lib *Library[ID, TX, DB]) ConsumeIdempotent(consumerGroup ConsumerGroupName, onFailure eventmodels.OnFailure, handlerName string, handler eventmodels.HandlerInterface, opts ...HandlerOpt) {
-	handler.SetLibrary(lib)
+	handler.SetLibrary(libraryInterface[ID, TX, DB]{lib})
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
 	lib.mustNotBeRunning("attempt configure event consumer in library that is already processing")
@@ -431,7 +451,7 @@ func (lib *Library[ID, TX, DB]) ConsumeIdempotent(consumerGroup ConsumerGroupNam
 // When broadcast handlers return error, the message will be dropped.
 // By default broadcast handlers are not retried and the handler timeout is 30 seconds.
 func (lib *Library[ID, TX, DB]) ConsumeBroadcast(handlerName string, handler eventmodels.HandlerInterface, opts ...HandlerOpt) {
-	handler.SetLibrary(lib)
+	handler.SetLibrary(libraryInterface[ID, TX, DB]{lib})
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
 	lib.mustNotBeRunning("attempt configure event consumer in library that is already processing")
@@ -766,9 +786,9 @@ func (lib *LibraryNoDB) validateTopic(unprefixedTopic string) error {
 	return nil
 }
 
-// RemovePrefix removes a prefix from a topic or consumer group that was added
+// removePrefix removes a prefix from a topic or consumer group that was added
 // because the library had SetPrefix called previously.
-func (lib *LibraryNoDB) RemovePrefix(topicOrConsumerGroup string) string {
+func (lib *LibraryNoDB) removePrefix(topicOrConsumerGroup string) string {
 	if lib.prefix == "" {
 		return topicOrConsumerGroup
 	}
@@ -785,4 +805,13 @@ func (lib *LibraryNoDB) addPrefixes(topicsOrConsumerGroups []string) []string {
 		p[i] = lib.prefix + unprefixed
 	}
 	return p
+}
+
+// libraryInterface exists to implement eventmodels.LibraryInterface and make RemovePrefix public
+type libraryInterface[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodels.AbstractDB[ID, TX]] struct {
+	*Library[ID, TX, DB]
+}
+
+func (lib libraryInterface[ID, TX, DB]) RemovePrefix(topicOrConsumerGroup string) string {
+	return lib.removePrefix(topicOrConsumerGroup)
 }

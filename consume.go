@@ -403,7 +403,7 @@ func (lib *Library[ID, TX, DB]) deliverOneMessage(
 		sequenceNumber: sequenceNumber,
 		Message:        &msg,
 	}
-	handlers, ok := group.topics[lib.RemovePrefix(msg.Topic)]
+	handlers, ok := group.topics[lib.removePrefix(msg.Topic)]
 	if ok {
 		waiters := make(chan handlerSuccess, len(handlers.handlerNames))
 		go func() {

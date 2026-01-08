@@ -278,7 +278,7 @@ func (lib *LibraryNoDB) listAvailableTopics() {
 					continue
 				}
 				seen[p.Topic] = true
-				unprefixedTopic := lib.RemovePrefix(p.Topic)
+				unprefixedTopic := lib.removePrefix(p.Topic)
 				if lib.prefix != "" && unprefixedTopic == p.Topic {
 					if debugPrefixIgnore {
 						lib.tracer.Logf("[events] topic %s found in partition, IGNORING (not prefixed)", p.Topic)
