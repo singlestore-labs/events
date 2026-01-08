@@ -28,11 +28,11 @@ type topicsWhy struct {
 // work to complete.
 
 const (
-	topicCreateSleepTime     = time.Second
-	topicCreationDeadline    = time.Second * 30
-	defaultNumPartitions     = 2
-	defaultReplicationFactor = 3
-	debugPrefixIgnore        = false
+	topicCreateSleepTime        = time.Second
+	topicCreationDeadline       = time.Second * 30
+	defaultNumPartitions        = 2
+	defaultReplicationFactor    = 3
+	debugLogTopicsMissingPrefix = false
 )
 
 // UnregisteredTopicError is the base error when attempting to create a
@@ -278,9 +278,9 @@ func (lib *LibraryNoDB) listAvailableTopics() {
 					continue
 				}
 				seen[p.Topic] = true
-				unprefixedTopic := lib.RemovePrefix(p.Topic)
+				unprefixedTopic := lib.removePrefix(p.Topic)
 				if lib.prefix != "" && unprefixedTopic == p.Topic {
-					if debugPrefixIgnore {
+					if debugLogTopicsMissingPrefix {
 						lib.tracer.Logf("[events] topic %s found in partition, IGNORING (not prefixed)", p.Topic)
 					}
 					continue

@@ -50,7 +50,7 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 	for i, event := range events {
 		topic := event.GetTopic()
 		messages[i].Topic = lib.addPrefix(topic)
-		ProduceTopicCounts.WithLabelValues(topic, string(method)).Inc()
+		ProduceTopicCounts.WithLabelValues(topic, messages[i].Topic).Inc()
 		messages[i].Key = []byte(event.GetKey())
 		ts := event.GetTimestamp()
 		if !ts.IsZero() {
