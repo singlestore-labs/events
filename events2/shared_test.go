@@ -87,6 +87,7 @@ func sqlDB(t ntest.T, ctx context.Context) *sql.DB {
 }
 
 var chain = nject.Sequence("s2test-injectors",
+	eventtest.Prefix("S2"),
 	eventtest.CommonInjectors,
 	nject.Required(nject.Provide("sql.DB", sqlDB)),
 	s2conn,

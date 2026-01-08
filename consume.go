@@ -70,6 +70,19 @@ func (lib *Library[ID, TX, DB]) StartConsuming(ctx context.Context) (started cha
 	if err != nil {
 		return nil, nil, err
 	}
+	for _, group := range lib.readers {
+		for topic := range group.topics {
+			if err := lib.validateTopic(topic); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+	for topic := range lib.broadcast.topics {
+		if err := lib.validateTopic(topic); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	if lib.hasTxConsumers && !lib.HasDB() {
 		return nil, nil, errors.Alertf("attempt to consume exactly-once in an event library w/o a database connection")
 	}
@@ -176,21 +189,22 @@ func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consume
 	if !isDeadLetter {
 		lib.startDeadLetterConsumers(ctx, consumerGroup, group, limiter, allStarted, allDone)
 	}
-	cg := string(consumerGroup)
+	cgWithPrefix := lib.addPrefix(string(consumerGroup))
 	if isBroadcast {
-		cg = "broadcast"
+		cgWithPrefix = "broadcast"
 	}
 	for topic, topicHandlers := range group.topics {
-		ConsumeCounts.WithLabelValues(topic, cg).Add(0)
+		prefixedTopic := lib.addPrefix(topic)
+		ConsumeCounts.WithLabelValues(prefixedTopic, cgWithPrefix).Add(0)
 		for handlerName, handler := range topicHandlers.handlers {
-			HandlerSuccessCounts.WithLabelValues(handlerName, topic).Add(0)
+			HandlerSuccessCounts.WithLabelValues(handlerName, prefixedTopic).Add(0)
 			if handler.isDeadLetter {
-				DeadLetterConsumeCounts.WithLabelValues(handlerName, handler.baseTopic).Add(0)
+				DeadLetterConsumeCounts.WithLabelValues(handlerName, lib.addPrefix(handler.baseTopic)).Add(0)
 			} else {
-				DeadLetterProduceCounts.WithLabelValues(handlerName, topic).Inc()
+				DeadLetterProduceCounts.WithLabelValues(handlerName, prefixedTopic).Inc()
 			}
-			HandlerPanicCounts.WithLabelValues(handlerName, topic).Add(0)
-			HandlerErrorCounts.WithLabelValues(handlerName, topic).Add(0)
+			HandlerPanicCounts.WithLabelValues(handlerName, prefixedTopic).Add(0)
+			HandlerErrorCounts.WithLabelValues(handlerName, prefixedTopic).Add(0)
 			if handler.requestedBatchSize > 0 {
 				HandlerBatchQueued.WithLabelValues(handlerName).Set(0)
 				HandlerBatchConcurrency.WithLabelValues(handlerName).Set(0)
@@ -222,7 +236,7 @@ func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consume
 					continue
 				}
 			} else {
-				reader, _, readerConfig, err = lib.getReader(ctx, consumerGroup, generic.Keys(group.topics), isBroadcast, false)
+				reader, _, readerConfig, err = lib.getReader(ctx, consumerGroup, lib.addPrefixes(generic.Keys(group.topics)), isBroadcast, false)
 				if err != nil {
 					// the only possible error is timeout with the context cancelled
 					return
@@ -258,38 +272,38 @@ func (lib *Library[ID, TX, DB]) startConsumingGroup(ctx context.Context, consume
 // go routine. Messages are explicitly committed in order by partition.
 func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consumerGroupName, group *group, activeLimiter *limit, isBroadcast bool, allDone *sync.WaitGroup, allStarted *sync.WaitGroup, priorSuccess *time.Time, reader *kafka.Reader, readerConfig *kafka.ReaderConfig) bool {
 	*priorSuccess = time.Now()
-	cg := string(consumerGroup)
+	cgWithPrefix := lib.addPrefix(string(consumerGroup))
 	queueLimit := simultaneous.New[eventLimiterType](group.maxQueueLimit()).SetForeverMessaging(
 		limiterStuckMessageAfter,
 		func() {
 			lib.tracer.Logf("[events] Queue depth for consumer group %s %s reached %s ago and processing is stuck",
-				consumerGroup, group.Describe(), limiterStuckMessageAfter)
+				cgWithPrefix, group.Describe(), limiterStuckMessageAfter)
 		},
 		func() {
 			lib.tracer.Logf("[events] Queue depth for consumer group %s %s is no longer stuck",
-				consumerGroup, group.Describe())
+				cgWithPrefix, group.Describe())
 		},
 	)
 	commitsSoftCtx, commitsCancel := context.WithCancel(ctx)
 	var outstandingWork sync.WaitGroup
 	if debugConsumeStartup {
-		lib.tracer.Logf("[events] Debug: consume %s readerconfig topics %v", consumerGroup, readerConfig.GroupTopics)
+		lib.tracer.Logf("[events] Debug: consume %s readerconfig topics %v", cgWithPrefix, readerConfig.GroupTopics)
 	}
 	defer func() {
 		// outstandingWork.Wait() must precede commitsCancel. CommitsCancel stops
 		// the processCommits task, but only once it has completed all pending work.
 		outstandingWork.Wait()
 		if debugConsume {
-			lib.tracer.Logf("[events] Debug: outstanding work for %s %s is done", consumerGroup, group.Describe())
+			lib.tracer.Logf("[events] Debug: outstanding work for %s %s is done", cgWithPrefix, group.Describe())
 		}
 		commitsCancel()
 		err := reader.Close()
 		if err != nil {
-			_ = lib.RecordError("reader close error", errors.Errorf("could not close reader for consumerGroup (%s): %w", consumerGroup, err))
+			_ = lib.RecordError("reader close error", errors.Errorf("could not close reader for consumerGroup (%s): %w", cgWithPrefix, err))
 		}
 	}()
 
-	lib.tracer.Logf("[events] consumer started for consumerGroup %s for %s", consumerGroup, group.Describe())
+	lib.tracer.Logf("[events] consumer started for consumerGroup %s for %s", cgWithPrefix, group.Describe())
 	sequenceNumbers := make(map[int]int)
 	// done is used to commit offsets for messages that have been processed
 	done := make(chan *messageAndSequenceNumber, commitQueueDepth)
@@ -298,45 +312,45 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 	// threads and to do that, we cannot wait on the commits process itself
 	// before signalling the commits process.
 	if debugConsumeStartup {
-		lib.tracer.Logf("[events] Debug: allDone +1 for process commits for %s %s", consumerGroup, group.Describe())
+		lib.tracer.Logf("[events] Debug: allDone +1 for process commits for %s %s", cgWithPrefix, group.Describe())
 	}
 	allDone.Add(1)
-	go lib.processCommits(commitsSoftCtx, ctx, consumerGroup, cg, reader, done, allDone)
+	go lib.processCommits(commitsSoftCtx, ctx, consumerGroup, cgWithPrefix, reader, done, allDone)
 	for {
 		select {
 		case <-ctx.Done():
-			lib.tracer.Logf("[events] done listeing for consumer group %s for topics %v", consumerGroup, group.Describe())
+			lib.tracer.Logf("[events] done reading from consumer group %s for topics %v", cgWithPrefix, group.Describe())
 			return false
 		default:
 		}
 		shortCtx, shortCancel := context.WithTimeout(ctx, group.maxIdle)
 		if debugConsume {
-			lib.tracer.Logf("[events] Debug: consume begin fetch %s %s with timeout %s", consumerGroup, group.Describe(), group.maxIdle)
+			lib.tracer.Logf("[events] Debug: consume begin fetch %s %s with timeout %s", cgWithPrefix, group.Describe(), group.maxIdle)
 		}
 		msg, err := reader.FetchMessage(shortCtx)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				select {
 				case <-ctx.Done():
-					lib.tracer.Logf("[events] done listening for consumer group %s for topics %v", consumerGroup, group.Describe())
+					lib.tracer.Logf("[events] done listening for consumer group %s for topics %v", cgWithPrefix, group.Describe())
 					shortCancel()
 					return false
 				default:
 				}
 				select {
 				case <-shortCtx.Done():
-					lib.tracer.Logf("[events] idle timeout for consumer group %s for topics %v", consumerGroup, group.Describe())
+					lib.tracer.Logf("[events] idle timeout for consumer group %s for topics %v", cgWithPrefix, group.Describe())
 					shortCancel() // to satisfy lint
 					return true
 				default:
 				}
 			}
-			_ = lib.RecordError("kafka fetch error", errors.Errorf("fetch from consumer group (%s) failed: %w", consumerGroup, err))
+			_ = lib.RecordError("kafka fetch error", errors.Errorf("fetch from consumer group (%s) failed: %w", cgWithPrefix, err))
 			shortCancel()
 			return true
 		}
 		if debugConsume {
-			lib.tracer.Logf("[events] Debug: received one %s message in consumer group %s: %s", msg.Topic, consumerGroup, string(msg.Key))
+			lib.tracer.Logf("[events] Debug: received one %s message in consumer group %s: %s", msg.Topic, cgWithPrefix, string(msg.Key))
 		}
 		shortCancel()
 		if isBroadcast {
@@ -350,17 +364,17 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 		}
 		sequenceNumber := sequenceNumbers[msg.Partition]
 		if debugAck {
-			lib.tracer.Logf("[events] Debug: ack sequence number assigned for %s %s %s is %d: %d", msg.Topic, string(msg.Key), consumerGroup, msg.Partition, sequenceNumber)
+			lib.tracer.Logf("[events] Debug: ack sequence number assigned for %s %s %s is %d: %d", msg.Topic, string(msg.Key), cgWithPrefix, msg.Partition, sequenceNumber)
 		}
 		sequenceNumbers[msg.Partition]++
-		ConsumeCounts.WithLabelValues(msg.Topic, cg).Inc()
+		ConsumeCounts.WithLabelValues(msg.Topic, cgWithPrefix).Inc()
 		outstandingWork.Add(1)
-		ConsumersWaitingForQueueConcurrencyDemand.WithLabelValues(cg).Add(1)
-		ConsumersWaitingForQueueConcurrencyLimit.WithLabelValues(cg).Add(1)
+		ConsumersWaitingForQueueConcurrencyDemand.WithLabelValues(cgWithPrefix).Add(1)
+		ConsumersWaitingForQueueConcurrencyLimit.WithLabelValues(cgWithPrefix).Add(1)
 		queuedLimit := queueLimit.Forever()
-		ConsumersWaitingForQueueConcurrencyLimit.WithLabelValues(cg).Add(-1)
-		TransmissionLatency.WithLabelValues(msg.Topic, cg).Observe(float64(time.Since(msg.Time)) / float64(time.Second))
-		go lib.deliverOneMessage(ctx, msg, consumerGroup, cg, group, &outstandingWork, queuedLimit, sequenceNumber, done, activeLimiter)
+		ConsumersWaitingForQueueConcurrencyLimit.WithLabelValues(cgWithPrefix).Add(-1)
+		TransmissionLatency.WithLabelValues(msg.Topic, cgWithPrefix).Observe(float64(time.Since(msg.Time)) / float64(time.Second))
+		go lib.deliverOneMessage(ctx, msg, consumerGroup, cgWithPrefix, group, &outstandingWork, queuedLimit, sequenceNumber, done, activeLimiter)
 	}
 }
 
@@ -374,7 +388,7 @@ func (lib *Library[ID, TX, DB]) deliverOneMessage(
 	ctx context.Context,
 	msg kafka.Message,
 	consumerGroup consumerGroupName,
-	cg string,
+	cgWithPrefix string,
 	group *group,
 	outstandingWork *sync.WaitGroup,
 	queuedLimit simultaneous.Limited[eventLimiterType],
@@ -384,23 +398,23 @@ func (lib *Library[ID, TX, DB]) deliverOneMessage(
 ) {
 	defer outstandingWork.Done()
 	defer queuedLimit.Done()
-	defer ConsumersWaitingForQueueConcurrencyDemand.WithLabelValues(cg).Add(-1)
+	defer ConsumersWaitingForQueueConcurrencyDemand.WithLabelValues(cgWithPrefix).Add(-1)
 	masn := messageAndSequenceNumber{
 		sequenceNumber: sequenceNumber,
 		Message:        &msg,
 	}
-	handlers, ok := group.topics[msg.Topic]
+	handlers, ok := group.topics[lib.removePrefix(msg.Topic)]
 	if ok {
 		waiters := make(chan handlerSuccess, len(handlers.handlerNames))
 		go func() {
 			if debugConsume {
-				lib.tracer.Logf("[events] Debug: consume will deliver message %s/%s in %s to %v", msg.Topic, string(msg.Key), consumerGroup, handlers.handlerNames)
+				lib.tracer.Logf("[events] Debug: consume will deliver message %s/%s in %s to %v", msg.Topic, string(msg.Key), cgWithPrefix, handlers.handlerNames)
 			}
 			for _, handlerName := range handlers.handlerNames {
 				handler := handlers.handlers[handlerName]
 				if handler.requestedBatchSize <= 0 {
 					if debugBatching {
-						lib.tracer.Logf("[events] Debug: delivering to handler %s without batching %s/%s in %s to %v", handlerName, msg.Topic, string(msg.Key), consumerGroup, handlers.handlerNames)
+						lib.tracer.Logf("[events] Debug: delivering to handler %s without batching %s/%s in %s to %v", handlerName, msg.Topic, string(msg.Key), cgWithPrefix, handlers.handlerNames)
 					}
 					successes := []bool{false}
 					lib.callHandler(ctx, activeLimiter, handler, []*kafka.Message{&msg}, successes)
@@ -420,13 +434,13 @@ func (lib *Library[ID, TX, DB]) deliverOneMessage(
 					handler.waitingBatch = append(handler.waitingBatch, mad)
 					if handler.batchesRunning >= handler.batchParallelism {
 						if debugBatching {
-							lib.tracer.Logf("[events] Debug: queuing for handler %s batch %s/%s in %s to %v", handlerName, msg.Topic, string(msg.Key), consumerGroup, handlers.handlerNames)
+							lib.tracer.Logf("[events] Debug: queuing for handler %s batch %s/%s in %s to %v", handlerName, msg.Topic, string(msg.Key), cgWithPrefix, handlers.handlerNames)
 						}
 						return len(handler.waitingBatch)
 					}
 					handler.batchesRunning += 1
 					if debugBatching {
-						lib.tracer.Logf("[events] Debug: starting additional batch processes for %s, %d/%d %s/%s in %s to %v", handlerName, handler.batchesRunning, handler.batchParallelism, msg.Topic, string(msg.Key), consumerGroup, handlers.handlerNames)
+						lib.tracer.Logf("[events] Debug: starting additional batch processes for %s, %d/%d %s/%s in %s to %v", handlerName, handler.batchesRunning, handler.batchParallelism, msg.Topic, string(msg.Key), cgWithPrefix, handlers.handlerNames)
 					}
 					HandlerBatchConcurrency.WithLabelValues(handler.name).Set(float64(handler.batchesRunning))
 					go lib.formAndDeliverBatches(ctx, handler, activeLimiter)
@@ -470,11 +484,11 @@ func (lib *Library[ID, TX, DB]) deliverOneMessage(
 			}
 		}
 	} else if debugConsume {
-		lib.tracer.Logf("[events] Debug: consume no handler for %s/%s in %s", msg.Topic, string(msg.Key), consumerGroup)
+		lib.tracer.Logf("[events] Debug: consume no handler for %s/%s in %s", msg.Topic, string(msg.Key), cgWithPrefix)
 	}
 	done <- &masn
 	if debugAck {
-		lib.tracer.Logf("[events] Debug: queued for ack %s/%s in %s", msg.Topic, string(msg.Key), consumerGroup)
+		lib.tracer.Logf("[events] Debug: queued for ack %s/%s in %s", msg.Topic, string(msg.Key), cgWithPrefix)
 	}
 }
 
@@ -628,7 +642,7 @@ func (lib *Library[ID, TX, DB]) callHandler(ctx context.Context, activeLimiter *
 				pending[i] = msgs[idx]
 			}
 			if handler.isDeadLetter {
-				DeadLetterConsumeCounts.WithLabelValues(handler.name, handler.baseTopic).Inc()
+				DeadLetterConsumeCounts.WithLabelValues(handler.name, lib.addPrefix(handler.baseTopic)).Inc()
 			}
 			return handler.handler.Handle(originalCtx, handler, pending)
 		}()
@@ -704,8 +718,8 @@ type queueAndSequence struct {
 }
 
 type messageTimestamp struct {
-	topic string
-	ts    time.Time
+	prefixedTopic string
+	ts            time.Time
 }
 
 // processCommits tells Kafka that it can advance the consumer offsets. It figures
@@ -718,7 +732,7 @@ type messageTimestamp struct {
 //
 // softCtx is used to request a shutdown, eventually, and will be ignored while there is work that can be done immediately.
 // softCtx is used during the switchover from one reader to another due to idleness.
-func (lib *Library[ID, TX, DB]) processCommits(softCtx context.Context, hardCtx context.Context, consumerGroup consumerGroupName, cg string, reader *kafka.Reader, done chan *messageAndSequenceNumber, allDone *sync.WaitGroup) {
+func (lib *Library[ID, TX, DB]) processCommits(softCtx context.Context, hardCtx context.Context, consumerGroup consumerGroupName, cgWithPrefix string, reader *kafka.Reader, done chan *messageAndSequenceNumber, allDone *sync.WaitGroup) {
 	defer func() {
 		if debugConsumeStartup {
 			lib.tracer.Logf("[events] Debug: allDone -1 for process commits for %s", consumerGroup)
@@ -827,8 +841,8 @@ func (lib *Library[ID, TX, DB]) processCommits(softCtx context.Context, hardCtx 
 					}
 					lastMessage = msg.Message
 					sendTimestamps = append(sendTimestamps, messageTimestamp{
-						topic: msg.Topic,
-						ts:    msg.Time,
+						prefixedTopic: msg.Topic,
+						ts:            msg.Time,
 					})
 				} else {
 					// not in-order, put it back
@@ -881,7 +895,7 @@ func (lib *Library[ID, TX, DB]) processCommits(softCtx context.Context, hardCtx 
 		}
 		clear(readyPartitions)
 		for _, ts := range sendTimestamps {
-			AckLatency.WithLabelValues(ts.topic, cg).Observe(float64(time.Since(ts.ts)) / float64(time.Second))
+			AckLatency.WithLabelValues(ts.prefixedTopic, cgWithPrefix).Observe(float64(time.Since(ts.ts)) / float64(time.Second))
 		}
 	}
 }

@@ -15,7 +15,7 @@ type SelfMarshalingEvent interface {
 type ProducingEvent interface {
 	GetKey() string
 	GetTimestamp() time.Time // used for the cloudevents time header
-	GetTopic() string        // Topic is also used to generate the cloudevents type header. Format: noun.verb
+	GetTopic() string        // Topic is also used to generate the cloudevents type header. The topic is un-prefixed. Suggested format: noun.verb
 	GetHeaders() map[string][]string
 }
 
@@ -30,7 +30,7 @@ type ProducingEvent interface {
 // so the "id" header will be the CloudEvents id and any other CloudEvents. For
 // non-CloudEvents-compliant messages, Headers will reflect the Kafka Headers.
 type Event[E any] struct {
-	Topic         string // may be a dead-letter topic
+	Topic         string // may be a dead-letter topic. Un-prefixed.
 	Key           string
 	Data          []byte
 	Payload       E
@@ -45,6 +45,6 @@ type Event[E any] struct {
 	DataSchema    string // optional CloudEvents field, empty if not set
 	ConsumerGroup string
 	HandlerName   string
-	BaseTopic     string // always the non-dead-letter topic, different from Topic when processing dead letters
+	BaseTopic     string // always the non-dead-letter topic, different from Topic when processing dead letters. Un-prefixed.
 	idx           int
 }

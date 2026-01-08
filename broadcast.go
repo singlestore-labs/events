@@ -177,7 +177,7 @@ func (lib *Library[ID, TX, DB]) getBroadcastReader(ctx context.Context, broadcas
 
 	// We get a reader. Once we check that there is exactly one reader, we know we have exclusive use
 	// of the group because any other thread will see more than one reader
-	reader, _, readerConfig, err = lib.getReader(ctx, broadcastConsumerGroup, broadcastTopics(generic.Keys(lib.broadcast.topics)), true, resetPosition)
+	reader, _, readerConfig, err = lib.getReader(ctx, broadcastConsumerGroup, lib.addPrefixes(broadcastTopics(generic.Keys(lib.broadcast.topics))), true, resetPosition)
 	if err != nil {
 		// context was cancelled
 		return nil, nil, errors.WithStack(err)
@@ -185,6 +185,7 @@ func (lib *Library[ID, TX, DB]) getBroadcastReader(ctx context.Context, broadcas
 
 	b := backoffPolicy.Start(ctx)
 
+	prefixedBroadcastConsumerGroup := lib.addPrefix(string(broadcastConsumerGroup))
 FreshClient:
 	for {
 		// We need a new client. Either the group was deleted and thus the broker may have changed,
@@ -209,7 +210,7 @@ FreshClient:
 		ctxWithTimeout, cancelCtx = context.WithTimeout(ctx, describeTimeout)
 		describeResponse, err := client.DescribeGroups(ctxWithTimeout, &kafka.DescribeGroupsRequest{
 			Addr:     client.Addr,
-			GroupIDs: []string{string(broadcastConsumerGroup)},
+			GroupIDs: []string{prefixedBroadcastConsumerGroup},
 		})
 		cancelCtx()
 		if err != nil {
@@ -223,7 +224,7 @@ FreshClient:
 			return nil, nil, errors.Errorf("could not describe broadcast group: %w", err)
 		}
 		for _, resp := range describeResponse.Groups {
-			if resp.GroupID != string(broadcastConsumerGroup) {
+			if resp.GroupID != prefixedBroadcastConsumerGroup {
 				return nil, nil, errors.Errorf("got a description for a group (%s) that wasn't what was asked for (%s)", resp.GroupID, broadcastConsumerGroup)
 			}
 			switch {
@@ -271,7 +272,7 @@ func (lib *Library[ID, TX, DB]) deleteBroadcastConsumerGroup(ctx context.Context
 			lib.tracer.Logf("[events] deleting consumer group %s", broadcastConsumerGroup)
 			resp, err := client.DeleteGroups(ctxWithTimeout, &kafka.DeleteGroupsRequest{
 				Addr:     client.Addr,
-				GroupIDs: []string{string(broadcastConsumerGroup)},
+				GroupIDs: []string{lib.addPrefix(string(broadcastConsumerGroup))},
 			})
 			cancelCtx()
 			switch {
@@ -476,22 +477,22 @@ func (a *lockIDAllocator) grow() {
 	a.max = n
 }
 
-func broadcastTopics(topics []string) []string {
-	if !generic.SliceContainsElement(topics, heartbeatTopic.Topic()) {
+func broadcastTopics(unprefixedTopics []string) []string {
+	if !generic.SliceContainsElement(unprefixedTopics, heartbeatTopic.Topic()) {
 		// we don't actually need a handler, just need to subscribe to the heartbeat topic
-		topics = append(generic.CopySlice(topics), heartbeatTopic.Topic())
+		unprefixedTopics = append(generic.CopySlice(unprefixedTopics), heartbeatTopic.Topic())
 	}
-	return topics
+	return unprefixedTopics
 }
 
 // getReader only returns once the reader is actually connected working. This is determined
 // by calling Stats()
 // The only error that getReader returns is from context cancellation
-func (lib *Library[ID, TX, DB]) getReader(ctx context.Context, consumerGroup consumerGroupName, topics []string, isBroadcast bool, resetPosition bool) (*kafka.Reader, *kafka.ReaderStats, *kafka.ReaderConfig, error) {
+func (lib *Library[ID, TX, DB]) getReader(ctx context.Context, consumerGroup consumerGroupName, prefixedTopics []string, isBroadcast bool, resetPosition bool) (*kafka.Reader, *kafka.ReaderStats, *kafka.ReaderConfig, error) {
 	readerConfig := kafka.ReaderConfig{
 		Brokers:                lib.brokers,
-		GroupID:                consumerGroup.String(),
-		GroupTopics:            topics,
+		GroupID:                lib.addPrefix(consumerGroup.String()),
+		GroupTopics:            prefixedTopics,
 		MaxBytes:               maxBytes,
 		Dialer:                 lib.dialer(),
 		StartOffset:            kafka.FirstOffset,

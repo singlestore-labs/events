@@ -17,6 +17,7 @@ type HandlerInfo interface {
 }
 
 type LibraryInterface interface {
+	RemovePrefix(string) string
 	Tracer() Tracer
 }
 
@@ -64,7 +65,7 @@ func handle[E any](ctx context.Context, handlerInfo HandlerInfo, messages []*kaf
 	errs = make([]error, len(messages))
 	metas := make([]Event[E], 0, len(messages))
 	for i, message := range messages {
-		meta, err := decode[E](message, handlerInfo.ConsumerGroup(), handlerInfo.Name())
+		meta, err := decode[E](message, handlerInfo.ConsumerGroup(), lib, handlerInfo.Name())
 		if err != nil {
 			lib.Tracer().Logf("[events] could not decode (%s) event (%s / %s) for handler (%s / %s): %+v", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
 			errs[i] = err
@@ -146,7 +147,7 @@ func handleTx[E any, ID AbstractID[ID], TX AbstractTX](ctx context.Context, hand
 	errs = make([]error, len(messages))
 	metas := make([]Event[E], 0, len(messages))
 	for i, message := range messages {
-		meta, err := decode[E](message, handlerInfo.ConsumerGroup(), handlerInfo.Name())
+		meta, err := decode[E](message, handlerInfo.ConsumerGroup(), lib, handlerInfo.Name())
 		if err != nil {
 			lib.Tracer().Logf("[events] could not decode (%s) tx event (%s / %s) for handler (%s / %s): %+v", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
 			errs[i] = err
