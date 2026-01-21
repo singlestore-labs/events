@@ -103,6 +103,7 @@ func DeadLetterTest[
 	}
 	var deliveryInfo deliveryInfoBlock
 
+	t.Logf("consumer group name: %s", Name(t)+"CG")
 	consumerGroup := events.NewConsumerGroup(Name(t) + "CG")
 
 	var lock sync.Mutex

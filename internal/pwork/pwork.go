@@ -24,14 +24,24 @@ import (
 	"github.com/lestrrat-go/backoff/v2"
 	"github.com/memsql/errors"
 	"github.com/muir/gwrap"
+	"github.com/singlestore-labs/events/internal/multi"
 )
 
 // Work provides the parameters for the jobs to be done.
 // Except where marked, all parameters are optional.
 type Work[Item comparable, Why any] struct {
-	MaxSimultaneous int                                    // required
-	BackoffPolicy   backoff.Policy                         // required
-	ItemWork        func(context.Context, Item, Why) error // called to do the work in a background thread. Required.
+	MaxSimultaneous int            // required
+	BackoffPolicy   backoff.Policy // required
+
+	// ItemWork is required if ItemsWork is nil
+	ItemWork func(context.Context, Item, Why) error // called to do the work in a background thread.
+
+	// ItemsWork is required if ItemWork is nil
+	// ItemsWork can return
+	// 	0 errors: all success
+	//	1 error: applies to all items
+	//	n (matching #items) errors: errors apply to items individually
+	ItemsWork func(context.Context, []Item, Why) []error // called to do the work in a background thread.
 
 	// everything below is optional
 
@@ -89,6 +99,7 @@ type itemProgress struct {
 	processing chan struct{} // closed when when request is finished
 	error      error
 	errorTime  time.Time
+	ctx        *multi.Context
 }
 
 func (w *Work[Item, Why]) GetState(item Item) ItemState {
@@ -102,6 +113,7 @@ func (w *Work[Item, Why]) GetState(item Item) ItemState {
 func (w *Work[Item, Why]) SetDone(item Item) {
 	n := &itemProgress{
 		processing: make(chan struct{}),
+		ctx:        multi.New(),
 	}
 	close(n.processing)
 	n.state.Store(int32(ItemDone))
@@ -136,6 +148,52 @@ func (w *Work[Item, Why]) WorkUntilDone(ctx context.Context, items []Item, why W
 }
 
 func (w *Work[Item, Why]) Work(ctx context.Context, items []Item, why Why) error {
+	handleResult := func(item Item, seen *itemProgress, err error) {
+		now := time.Now()
+		// This function exists so that the lock is held for a minimal time
+		done := func() bool {
+			seen.lock.Lock()
+			defer seen.lock.Unlock()
+			if err != nil {
+				// must set error before setting state to failed
+				seen.error = errors.WithStack(err)
+				seen.errorTime = now
+				seen.state.Store(int32(ItemFailed))
+				close(seen.processing)
+			} else if ItemState(seen.state.Load()) == ItemProcessing {
+				seen.state.Store(int32(ItemDone))
+				close(seen.processing)
+				return true
+			}
+			return false
+		}()
+		if done && w.ItemDone != nil {
+			w.ItemDone(ctx, item, why)
+		}
+		if err != nil && w.ItemFailed != nil {
+			// We call this after saving the error in seen.error because
+			// we also call w.ItemFailed later on seen.error and we don't
+			// want to double-wrap the error.
+			_ = w.ItemFailed(ctx, item, why, err, true)
+		}
+	}
+
+	getSlot := func(item Item) error {
+		select {
+		case w.simultaneousLimit <- struct{}{}:
+			return nil
+		case <-ctx.Done():
+			err := ctx.Err()
+			if w.ItemTimeoutError != nil {
+				err = w.ItemTimeoutError(ctx, item, why, err)
+			}
+			return err
+		}
+	}
+	releaseSlot := func() {
+		<-w.simultaneousLimit
+	}
+
 	if w.MaxSimultaneous <= 0 {
 		return errors.Errorf("must set MaxSimultaneous")
 	}
@@ -156,12 +214,17 @@ func (w *Work[Item, Why]) Work(ctx context.Context, items []Item, why Why) error
 	var firstWorkFound bool // no point in logging much until we know there is work to do
 	var outstanding map[Item]*itemProgress
 	var overrideFinalError error
+	var todo []Item
+	if w.ItemWork == nil {
+		todo = make([]Item, 0, len(items))
+	}
 	for _, item := range items {
 		seen, ok := w.progressStore.Load(item)
 		if !ok {
 			seen, ok = w.progressStore.LoadOrStore(item,
 				&itemProgress{
 					processing: make(chan struct{}),
+					ctx:        multi.New(),
 				})
 		}
 		state := ItemState(seen.state.Load())
@@ -174,6 +237,8 @@ func (w *Work[Item, Why]) Work(ctx context.Context, items []Item, why Why) error
 			}
 			firstWorkFound = true
 		}
+		// If the item didn't previously exist, then we'll have to do work.
+		// We'll also have to do work if the item failed and it's time to try again.
 		doWork := !ok
 		if state == ItemFailed {
 			var err error
@@ -214,49 +279,20 @@ func (w *Work[Item, Why]) Work(ctx context.Context, items []Item, why Why) error
 					continue
 				}
 			}
-			select {
-			case w.simultaneousLimit <- struct{}{}:
-				// great
-			case <-ctx.Done():
-				err := ctx.Err()
-				if w.ItemTimeoutError != nil {
-					err = w.ItemTimeoutError(ctx, item, why, err)
+			seen.ctx.Add(ctx)
+			if w.ItemWork != nil {
+				err := getSlot(item)
+				if err != nil {
+					return err
 				}
-				return err
+				go func() {
+					defer releaseSlot()
+					err := w.ItemWork(seen.ctx, item, why)
+					handleResult(item, seen, err)
+				}()
+			} else {
+				todo = append(todo, item)
 			}
-			go func() {
-				defer func() {
-					<-w.simultaneousLimit // release slot
-				}()
-				err := w.ItemWork(ctx, item, why)
-				now := time.Now()
-				// This function exists so that the lock is held for a minimal time
-				done := func() bool {
-					seen.lock.Lock()
-					defer seen.lock.Unlock()
-					if err != nil {
-						// must set error before setting state to failed
-						seen.error = errors.WithStack(err)
-						seen.errorTime = now
-						seen.state.Store(int32(ItemFailed))
-						close(seen.processing)
-					} else if ItemState(seen.state.Load()) == ItemProcessing {
-						seen.state.Store(int32(ItemDone))
-						close(seen.processing)
-						return true
-					}
-					return false
-				}()
-				if done && w.ItemDone != nil {
-					w.ItemDone(ctx, item, why)
-				}
-				if err != nil && w.ItemFailed != nil {
-					// We call this after saving the error in seen.error because
-					// we also call w.ItemFailed later on seen.error and we don't
-					// want to double-wrap the error.
-					_ = w.ItemFailed(ctx, item, why, err, true)
-				}
-			}()
 		}
 		if outstanding == nil {
 			outstanding = make(map[Item]*itemProgress)
@@ -266,9 +302,37 @@ func (w *Work[Item, Why]) Work(ctx context.Context, items []Item, why Why) error
 		}
 		outstanding[item] = seen
 	}
+	if w.ItemWork == nil && len(todo) != 0 {
+		anySeen, _ := w.progressStore.Load(todo[0])
+		err := getSlot(todo[0])
+		if err != nil {
+			return err
+		}
+		go func() {
+			defer releaseSlot()
+			errs := w.ItemsWork(anySeen.ctx, todo, why)
+			for i, item := range todo {
+				seen, _ := w.progressStore.Load(item)
+				var err error
+				switch len(errs) {
+				case len(todo):
+					err = errs[i]
+				case 1:
+					err = errs[0]
+				case 0:
+					err = nil
+				default:
+					err = errors.Errorf("unknown result, internal error, length of error return does not match")
+				}
+				handleResult(item, seen, err)
+			}
+		}()
+	}
+
 	if len(outstanding) == 0 || overrideFinalError != nil {
 		return overrideFinalError
 	}
+
 	for item, seen := range outstanding {
 		select {
 		case <-seen.processing:
