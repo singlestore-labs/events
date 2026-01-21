@@ -34,18 +34,21 @@ func BroadcastDeliveryTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	baseT := t
-	t = ntest.ExtraDetailLogger(t, "TBDT")
+	t = ntest.ExtraDetailLogger(t, string(prefix)+"TBDT")
 
 	t.Log("Create two library instances")
 	lib1 := events.New[ID, TX, DB]()
 	lib1.SetEnhanceDB(true)
+	lib1.SetPrefix(string(prefix))
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SetEnhanceDB(true)
+	lib2.SetPrefix(string(prefix))
 
-	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, "TBDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TBDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"TBDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"TBDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	if !IsNilDB(conn) {
 		conn.AugmentWithProducer(lib1)
 	}
@@ -193,19 +196,22 @@ func IdempotentDeliveryTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	baseT := t
-	t = ntest.ExtraDetailLogger(t, "TIDT")
+	t = ntest.ExtraDetailLogger(t, string(prefix)+"TIDT")
 
 	lib1 := events.New[ID, TX, DB]()
 	lib1.SetEnhanceDB(true)
 	lib1.SkipNotifierSupport()
+	lib1.SetPrefix(string(prefix))
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SetEnhanceDB(true)
 	lib2.SkipNotifierSupport()
+	lib2.SetPrefix(string(prefix))
 
-	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, "TIDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TIDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"TIDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"TIDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	if !IsNilDB(conn) {
 		conn.AugmentWithProducer(lib1)
 	}
@@ -354,23 +360,26 @@ func ExactlyOnceDeliveryTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
 	if IsNilDB(conn) {
 		t.Skipf("%s requires a database", t.Name())
 	}
 
 	baseT := t
-	t = ntest.ExtraDetailLogger(t, "TEOD")
+	t = ntest.ExtraDetailLogger(t, string(prefix)+"TEOD")
 
 	lib1 := events.New[ID, TX, DB]()
 	lib1.SetEnhanceDB(true)
 	lib1.SkipNotifierSupport()
+	lib1.SetPrefix(string(prefix))
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SetEnhanceDB(true)
 	lib2.SkipNotifierSupport()
+	lib2.SetPrefix(string(prefix))
 
-	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, "TEOD-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, "TEOD-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"TEOD-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"TEOD-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	conn.AugmentWithProducer(lib1)
 
 	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t) + "Topic")
@@ -514,10 +523,12 @@ func CloudEventEncodingTest[
 	conn DB,
 	brokers Brokers,
 	cancel Cancel,
+	prefix Prefix,
 ) {
-	t = ntest.ExtraDetailLogger(t, "TCEE")
+	t = ntest.ExtraDetailLogger(t, string(prefix)+"TCEE")
 	lib := events.New[ID, TX, DB]()
 	lib.SkipNotifierSupport()
+	lib.SetPrefix(string(prefix))
 	var lock sync.Mutex
 
 	type myEvent map[string]string
@@ -620,19 +631,19 @@ func CloudEventEncodingTest[
 
 	messages := []kafka.Message{
 		{
-			Topic:   topic.Topic(),
+			Topic:   string(prefix) + topic.Topic(),
 			Key:     []byte(id2),
 			Headers: msg2Headers,
 			Value:   encMsg2,
 		},
 		{
-			Topic:   topic.Topic(),
+			Topic:   string(prefix) + topic.Topic(),
 			Key:     []byte(id3),
 			Headers: msg3Headers,
 			Value:   encMsg3,
 		},
 		{
-			Topic:   topic.Topic(),
+			Topic:   string(prefix) + topic.Topic(),
 			Key:     []byte(id4),
 			Headers: msg4Headers,
 			Value:   encBody,

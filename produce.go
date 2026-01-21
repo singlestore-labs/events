@@ -49,8 +49,8 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 	messages := make([]kafka.Message, len(events))
 	for i, event := range events {
 		topic := event.GetTopic()
-		messages[i].Topic = topic
-		ProduceTopicCounts.WithLabelValues(topic, string(method)).Inc()
+		messages[i].Topic = lib.addPrefix(topic)
+		ProduceTopicCounts.WithLabelValues(topic, messages[i].Topic).Inc()
 		messages[i].Key = []byte(event.GetKey())
 		ts := event.GetTimestamp()
 		if !ts.IsZero() {

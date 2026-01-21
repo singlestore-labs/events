@@ -21,6 +21,8 @@ import (
 
 type T = ntest.T
 
+type Prefix string
+
 type Brokers []string
 
 func KafkaBrokers(t T) Brokers {
