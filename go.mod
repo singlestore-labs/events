@@ -17,7 +17,7 @@ require (
 	github.com/muir/nject/v2 v2.1.0
 	github.com/muir/testinglogur v0.0.1
 	github.com/prometheus/client_golang v1.23.2
-	github.com/segmentio/kafka-go v0.4.49
+	github.com/segmentio/kafka-go v0.4.50
 	github.com/sharnoff/eventdistributor v0.1.1
 	github.com/singlestore-labs/generic v0.5.0
 	github.com/singlestore-labs/once v0.0.1
