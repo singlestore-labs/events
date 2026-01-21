@@ -4,6 +4,7 @@ go 1.23.0
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
+	github.com/chrismcguire/gobberish v0.0.0-20150821175641-1d8adb509a0e
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/gofrs/uuid/v5 v5.4.0
 	github.com/google/uuid v1.6.0
@@ -21,7 +22,7 @@ require (
 	github.com/sharnoff/eventdistributor v0.1.1
 	github.com/singlestore-labs/generic v0.5.0
 	github.com/singlestore-labs/once v0.0.1
-	github.com/singlestore-labs/simultaneous v0.0.1
+	github.com/singlestore-labs/simultaneous v0.1.0
 	github.com/singlestore-labs/wait v0.0.1
 	github.com/stretchr/testify v1.11.1
 )
@@ -30,7 +31,6 @@ require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/chrismcguire/gobberish v0.0.0-20150821175641-1d8adb509a0e // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/hashicorp/errwrap v1.0.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect

@@ -12,56 +12,32 @@ import (
 	"github.com/memsql/ntest"
 	"github.com/muir/nject/v2"
 	"github.com/segmentio/kafka-go"
-	"github.com/singlestore-labs/once"
 	"github.com/singlestore-labs/wait"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/events/eventtest/eventtestutil"
 )
 
 // --------- begin section that is duplicated in eventtest/common.go -----------
 
-type T = ntest.T
-
-type Brokers []string
-
-func KafkaBrokers(t T) Brokers {
-	brokers := os.Getenv("EVENTS_KAFKA_BROKERS")
-	if brokers == "" {
-		t.Skip("EVENTS_KAFKA_BROKERS must be set to run this test")
-	}
-	return Brokers(strings.Split(brokers, " "))
-}
-
-var CommonInjectors = nject.Sequence("common",
-	nject.Provide("context", context.Background),
-	nject.Required(nject.Provide("Report-results", func(inner func(), t T) {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Logf("RESULT: %s FAILED w/panic", t.Name())
-				panic(r)
-			}
-			if t.Failed() {
-				t.Logf("RESULT: %s FAILED", t.Name())
-			} else {
-				t.Logf("RESULT: %s PASSED", t.Name())
-			}
-		}()
-		inner()
-	})),
-	nject.Provide("cancel", AutoCancel),
-	nject.Provide("brokers", KafkaBrokers),
+type (
+	Brokers = eventtestutil.Brokers
+	Cancel  = eventtestutil.Cancel
+	Prefix  = eventtestutil.Prefix
+	T       = ntest.T
 )
 
-type Cancel func()
-
-func AutoCancel(ctx context.Context, t T) (context.Context, Cancel) {
-	ctx, cancel := context.WithCancel(ctx)
-	onlyOnce := once.New(cancel)
-	t.Cleanup(onlyOnce.Do)
-	return ctx, onlyOnce.Do
-}
+var (
+	AutoCancel      = eventtestutil.AutoCancel
+	CatchPanic      = eventtestutil.CatchPanic
+	CommonInjectors = eventtestutil.CommonInjectors
+	GetTracerConfig = eventtestutil.GetTracerConfig
+	KafkaBrokers    = eventtestutil.KafkaBrokers
+	TracerContext   = eventtestutil.TracerContext
+	TracerProvider  = eventtestutil.TracerProvider
+)
 
 // --------- end section that is duplicated in eventtest/common.go -----------
 
@@ -121,13 +97,17 @@ func TestBroadcastGroupRefresh(t *testing.T) {
 		) {
 			baseT := t
 			lib1 := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
-			lib1.Configure(nil, ntest.ExtraDetailLogger(baseT, "BGR-1"), false, SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+			lib1.Configure(nil, TracerProvider(baseT, "BGR-1"), false, SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+			lib1.SetTracerConfig(GetTracerConfig(baseT))
 			lib2 := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
-			lib2.Configure(nil, ntest.ExtraDetailLogger(baseT, "BGR-2"), false, SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+			lib2.Configure(nil, TracerProvider(baseT, "BGR-2"), false, SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+			lib2.SetTracerConfig(GetTracerConfig(baseT))
+
+			tracerCtx := TracerContext(ctx, t)
 
 			for try := 1; try <= 10; try++ {
 				t.Log("attempt #%d to reuse the consumer group", try)
-				g1, r1, _, u1, err := lib1.getBroadcastConsumerGroup(ctx, time.Duration(0))
+				g1, r1, _, u1, err := lib1.getBroadcastConsumerGroup(tracerCtx, time.Duration(0))
 				require.NoError(t, err)
 				t.Logf("got group %s", g1)
 				t.Log("closing the reader, unlocking the group")
@@ -135,7 +115,7 @@ func TestBroadcastGroupRefresh(t *testing.T) {
 				assert.True(t, strings.HasPrefix(string(g1), defaultLockFreeBroadcastBase), "prefix")
 
 				// Sometimes even though r1 is closed, the group isn't available. We should be able
-				g2, r2, _, err := lib1.refreshBroadcastReader(ctx, g1, &u1)
+				g2, r2, _, err := lib1.refreshBroadcastReader(tracerCtx, g1, &u1)
 				require.NoError(t, err)
 				_ = r2.Close()
 				t.Logf("refreshed to group %s", g2)
@@ -149,7 +129,7 @@ func TestBroadcastGroupRefresh(t *testing.T) {
 				var rX *kafka.Reader
 				require.NoError(t, wait.For(func() (bool, error) {
 					var err error
-					rX, _, err = lib2.getBroadcastReader(ctx, g1, false)
+					rX, _, err = lib2.getBroadcastReader(tracerCtx, g1, false)
 					if err != nil {
 						if errors.Is(err, errGroupUnavailable) {
 							t.Logf("group %s not available (yet): %s", g1, err)
@@ -164,7 +144,7 @@ func TestBroadcastGroupRefresh(t *testing.T) {
 				}()
 
 				t.Log("now that %s is locked to another server, getting it in the first should fail", g1)
-				g4, r4, _, err := lib1.refreshBroadcastReader(ctx, g1, &u1)
+				g4, r4, _, err := lib1.refreshBroadcastReader(tracerCtx, g1, &u1)
 				require.NoError(t, err)
 				_ = r4.Close()
 				t.Log("refreshed to %s", g4)

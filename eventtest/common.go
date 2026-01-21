@@ -10,64 +10,32 @@ import (
 
 	"github.com/memsql/ntest"
 	"github.com/muir/nject/v2"
-	"github.com/singlestore-labs/once"
 	"github.com/stretchr/testify/require"
 
 	"github.com/singlestore-labs/events"
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/events/eventtest/eventtestutil"
 	"github.com/singlestore-labs/events/internal"
 )
 
 // --------- begin section that is duplicated in consumer_group_test.go -----------
 
-type T = ntest.T
-
-type Prefix string
-
-type Brokers []string
-
-func KafkaBrokers(t T) Brokers {
-	brokers := os.Getenv("EVENTS_KAFKA_BROKERS")
-	if brokers == "" {
-		t.Skip("EVENTS_KAFKA_BROKERS must be set to run this test")
-	}
-	return Brokers(strings.Split(brokers, " "))
-}
-
-var CommonInjectors = nject.Sequence("common",
-	nject.Required(func(t T) {
-		t.Logf("starting %s", t.Name())
-	}),
-	nject.Provide("context", context.Background),
-	nject.Required(nject.Provide("Report-results", func(inner func(), t T) {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Logf("RESULT: %s FAILED w/panic", t.Name())
-				panic(r)
-			}
-			switch {
-			case t.Failed():
-				t.Logf("RESULT: %s FAILED", t.Name())
-			case t.Skipped():
-				t.Logf("RESULT: %s SKIPPED", t.Name())
-			default:
-				t.Logf("RESULT: %s PASSED", t.Name())
-			}
-		}()
-		inner()
-	})),
-	nject.Provide("cancel", AutoCancel),
-	nject.Provide("brokers", KafkaBrokers),
+type (
+	Brokers = eventtestutil.Brokers
+	Cancel  = eventtestutil.Cancel
+	Prefix  = eventtestutil.Prefix
+	T       = ntest.T
 )
 
-type Cancel func()
-
-func AutoCancel(ctx context.Context, t T) (context.Context, Cancel) {
-	ctx, cancel := context.WithCancel(ctx)
-	onlyOnce := once.New(cancel)
-	t.Cleanup(onlyOnce.Do)
-	return ctx, onlyOnce.Do
-}
+var (
+	AutoCancel      = eventtestutil.AutoCancel
+	CatchPanic      = eventtestutil.CatchPanic
+	CommonInjectors = eventtestutil.CommonInjectors
+	GetTracerConfig = eventtestutil.GetTracerConfig
+	KafkaBrokers    = eventtestutil.KafkaBrokers
+	TracerContext   = eventtestutil.TracerContext
+	TracerProvider  = eventtestutil.TracerProvider
+)
 
 // --------- end section that is duplicated in consumer_group_test.go -----------
 

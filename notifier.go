@@ -16,7 +16,7 @@ import (
 // CanConsumeBroadcast is implemented by [Library]
 type CanConsumeBroadcast interface {
 	ConsumeBroadcast(handlerName string, handler eventmodels.HandlerInterface, opts ...HandlerOpt)
-	Tracer() eventmodels.Tracer
+	TracerProvider(context.Context) eventmodels.Tracer
 	InstanceID() int32
 }
 
@@ -73,12 +73,12 @@ func processOpts(lib CanConsumeBroadcast, handlerName string, opts []NotifierOpt
 	}
 	limiter := simultaneous.New[notifierLimiterType](tmpLimit).SetForeverMessaging(
 		limiterStuckMessageAfter,
-		func() {
+		func(ctx context.Context) {
 			_ = throttle.Alertf("distributor (%s) is stuck, waiting (%s) for a runner", handlerName, limiterStuckMessageAfter)
-			lib.Tracer().Logf("[events] distributor %s is stuck due to reaching the simultaneous limit", handlerName)
+			lib.TracerProvider(ctx)("[events] distributor %s is stuck due to reaching the simultaneous limit", handlerName)
 		},
-		func() {
-			lib.Tracer().Logf("[events] distributor %s is no longer stuck", handlerName)
+		func(ctx context.Context) {
+			lib.TracerProvider(ctx)("[events] distributor %s is no longer stuck", handlerName)
 		},
 	)
 	return config, limiter
@@ -98,9 +98,9 @@ func RegisterFiltered[E any, K comparable](handlerName string, topic eventmodels
 		distributor := keyeddistributor.New(key)
 		lib.ConsumeBroadcast(handlerName, topic.Handler(func(ctx context.Context, event eventmodels.Event[E]) error {
 			if debugNotify {
-				lib.Tracer().Logf("[events] DEBUG: filtered distributor to %s, starting to handle %s / %s / %s",
+				lib.TracerProvider(ctx)("[events] DEBUG: filtered distributor to %s, starting to handle %s / %s / %s",
 					handlerName, event.Topic, event.Key, event.ID)
-				defer lib.Tracer().Logf("[events] DEBUG: filtered distributor to %s, done handling %s / %s / %s",
+				defer lib.TracerProvider(ctx)("[events] DEBUG: filtered distributor to %s, done handling %s / %s / %s",
 					handlerName, event.Topic, event.Key, event.ID)
 			}
 			switch config.asyncLimit {
@@ -109,7 +109,7 @@ func RegisterFiltered[E any, K comparable](handlerName string, topic eventmodels
 				return nil
 			case 0:
 			default:
-				limited := limiter.Forever()
+				limited := limiter.Forever(ctx)
 				defer limited.Done()
 			}
 			select {
@@ -152,9 +152,9 @@ func RegisterUnfiltered[E any](handlerName string, topic eventmodels.BoundTopic[
 		distributor := eventdistributor.New[eventmodels.Event[E]]()
 		lib.ConsumeBroadcast(handlerName, topic.Handler(func(ctx context.Context, event eventmodels.Event[E]) error {
 			if debugNotify {
-				lib.Tracer().Logf("[events] DEBUG: unfiltered distributor to %s, starting to handle %s / %s / %s",
+				lib.TracerProvider(ctx)("[events] DEBUG: unfiltered distributor to %s, starting to handle %s / %s / %s",
 					handlerName, event.Topic, event.Key, event.ID)
-				defer lib.Tracer().Logf("[events] DEBUG: unfiltered distributor to %s, done handling %s / %s / %s",
+				defer lib.TracerProvider(ctx)("[events] DEBUG: unfiltered distributor to %s, done handling %s / %s / %s",
 					handlerName, event.Topic, event.Key, event.ID)
 			}
 			switch config.asyncLimit {
@@ -163,7 +163,7 @@ func RegisterUnfiltered[E any](handlerName string, topic eventmodels.BoundTopic[
 				return nil
 			case 0:
 			default:
-				limited := limiter.Forever()
+				limited := limiter.Forever(ctx)
 				defer limited.Done()
 			}
 			select {

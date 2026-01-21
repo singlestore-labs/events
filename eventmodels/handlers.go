@@ -14,11 +14,13 @@ type HandlerInfo interface {
 	Name() string
 	BaseTopic() string
 	ConsumerGroup() string
+	IsDeadLetter() bool
 }
 
 type LibraryInterface interface {
 	RemovePrefix(string) string
-	Tracer() Tracer
+	TracerProvider(context.Context) Tracer
+	TracerConfig() TracerConfig
 }
 
 type LibraryInterfaceTx[ID AbstractID[ID], TX AbstractTX] interface {
@@ -64,27 +66,31 @@ func (h *handler[E]) Handle(ctx context.Context, handlerInfo HandlerInfo, messag
 func handle[E any](ctx context.Context, handlerInfo HandlerInfo, messages []*kafka.Message, lib LibraryInterface, callback func(context.Context, []Event[E]) error) (errs []error) {
 	errs = make([]error, len(messages))
 	metas := make([]Event[E], 0, len(messages))
+	callbackCtx := make([]context.Context, len(messages))
 	for i, message := range messages {
+		handlerCtx, done := lib.TracerConfig().Handle(ctx, handlerInfo.IsDeadLetter(), handlerInfo.Name(), message)
+		defer done()
+		callbackCtx[i] = handlerCtx
 		meta, err := decode[E](message, handlerInfo.ConsumerGroup(), lib, handlerInfo.Name())
 		if err != nil {
-			lib.Tracer().Logf("[events] could not decode (%s) event (%s / %s) for handler (%s / %s): %+v", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
+			lib.TracerProvider(handlerCtx)("[events] could not decode (%s) event (%s / %s) for handler (%s / %s): %+v", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
 			errs[i] = err
 			continue
 		}
 		meta.BaseTopic = handlerInfo.BaseTopic()
 		meta.idx = i
 		metas = append(metas, meta)
-		lib.Tracer().Logf("[events] delivering (%s) event (%s / %s) to handler (%s / %s)", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name())
+		lib.TracerProvider(handlerCtx)("[events] delivered (%s) event (%s / %s) to handler (%s / %s)", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name())
 	}
 	if len(metas) == 0 {
 		return
 	}
-	callbackErr := callback(ctx, metas)
+	callbackErr := callback(callbackCtx[metas[0].idx], metas)
 	for _, meta := range metas {
 		if callbackErr != nil {
 			errs[meta.idx] = errors.Errorf("consume error handling (%s) event (%s / %s) in with handler (%s / %s): %w", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), callbackErr)
 		} else if debugDelivery {
-			lib.Tracer().Logf("[events] success delivering (%s) event (%s / %s) to handler (%s / %s)", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name())
+			lib.TracerProvider(callbackCtx[meta.idx])("[events] success delivering (%s) event (%s / %s) to handler (%s / %s)", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name())
 		}
 	}
 	return
@@ -146,10 +152,14 @@ func (h *handlerTx[E, ID, TX]) Handle(ctx context.Context, handlerInfo HandlerIn
 func handleTx[E any, ID AbstractID[ID], TX AbstractTX](ctx context.Context, handlerInfo HandlerInfo, messages []*kafka.Message, lib LibraryInterfaceTx[ID, TX], callback func(context.Context, TX, []Event[E]) error) (errs []error) {
 	errs = make([]error, len(messages))
 	metas := make([]Event[E], 0, len(messages))
+	callbackCtx := make([]context.Context, len(messages))
 	for i, message := range messages {
+		handlerCtx, done := lib.TracerConfig().Handle(ctx, handlerInfo.IsDeadLetter(), handlerInfo.Name(), message)
+		defer done()
+		callbackCtx[i] = handlerCtx
 		meta, err := decode[E](message, handlerInfo.ConsumerGroup(), lib, handlerInfo.Name())
 		if err != nil {
-			lib.Tracer().Logf("[events] could not decode (%s) tx event (%s / %s) for handler (%s / %s): %+v", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
+			lib.TracerProvider(handlerCtx)("[events] could not decode (%s) tx event (%s / %s) for handler (%s / %s): %+v", message.Topic, meta.ID, string(message.Key), handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
 			errs[i] = err
 			continue
 		}
@@ -162,18 +172,18 @@ func handleTx[E any, ID AbstractID[ID], TX AbstractTX](ctx context.Context, hand
 	err := lib.DB().Transact(ctx, func(tx TX) error {
 		todo := make([]Event[E], 0, len(metas))
 		for i, meta := range metas {
-			err := lib.DB().MarkEventProcessed(ctx, tx, handlerInfo.BaseTopic(), meta.Source, meta.ID, handlerInfo.Name())
+			err := lib.DB().MarkEventProcessed(callbackCtx[meta.idx], tx, handlerInfo.BaseTopic(), meta.Source, meta.ID, handlerInfo.Name())
 			if err != nil {
 				if errors.Is(err, ErrAlreadyProcessed) {
 					alreadyDone[i] = true
-					lib.Tracer().Logf("[events] tx (%s) event (%s / %s) for handler (%s / %s) already delivered", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name())
+					lib.TracerProvider(callbackCtx[meta.idx])("[events] tx (%s) event (%s / %s) for handler (%s / %s) already delivered", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name())
 					continue
 				}
 				err = errors.WithStack(err)
-				lib.Tracer().Logf("[events] db failure delivering tx (%s) event (%s / %s) to handler (%s / %s): %+v", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
+				lib.TracerProvider(callbackCtx[meta.idx])("[events] db failure delivering tx (%s) event (%s / %s) to handler (%s / %s): %+v", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
 				return err
 			}
-			lib.Tracer().Logf("[events] delivering tx (%s) event (%s / %s) to handler (%s / %s)", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name())
+			lib.TracerProvider(callbackCtx[meta.idx])("[events] delivering tx (%s) event (%s / %s) to handler (%s / %s)", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name())
 			todo = append(todo, meta)
 		}
 		if len(todo) == 0 {
@@ -187,7 +197,7 @@ func handleTx[E any, ID AbstractID[ID], TX AbstractTX](ctx context.Context, hand
 		}
 		if err != nil {
 			errs[meta.idx] = errors.Errorf("consume error handling (%s) tx event (%s / %s) in with handler (%s / %s): %w", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
-			lib.Tracer().Logf("[events] tx failure delivering tx (%s) event (%s / %s) to handler (%s / %s): %+v", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
+			lib.TracerProvider(callbackCtx[meta.idx])("[events] tx failure delivering tx (%s) event (%s / %s) to handler (%s / %s): %+v", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), err)
 		}
 	}
 	return

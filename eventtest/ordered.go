@@ -128,6 +128,7 @@ func OrderedTest[
 	conn.AugmentWithProducer(lib)
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic1.Topic()})
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic2.Topic()})
+	lib.SetTracerConfig(GetTracerConfig(t))
 
 	key1 := uuid.New().String()
 	t.Logf("E1: %s", key1)
@@ -176,12 +177,16 @@ func OrderedTest[
 		return nil
 	}))
 
-	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, string(libraryPrefix)+testPrefix+"-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, TracerProvider(baseT, string(libraryPrefix)+testPrefix+"-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	consumeDone := lib.StartConsumingOrPanic(ctx)
+
+	tracerCtx := TracerContext(ctx, t)
+	defer lib.Shutdown(tracerCtx)
+	defer CatchPanic(t)
 
 	t.Log("producing may take a few tries for brand new topics")
 	require.NoError(t, wait.For(func() (bool, error) {
-		err := lib.Produce(ctx, eventmodels.ProduceImmediate, topic2.Event(key2, myType{"ID": key2}))
+		err := lib.Produce(tracerCtx, eventmodels.ProduceImmediate, topic2.Event(key2, myType{"ID": key2}))
 		if err != nil {
 			t.Logf("got error trying to produce: %v", err)
 			return false, err
@@ -190,7 +195,7 @@ func OrderedTest[
 	}, wait.ExitOnError(false), wait.WithLimit(time.Second*60)))
 	t.Logf("sent E2: %s", key2)
 	require.NoError(t, wait.For(func() (bool, error) {
-		err := lib.Produce(ctx, eventmodels.ProduceImmediate, topic1.Event(key1, myType{"ID": key1}))
+		err := lib.Produce(tracerCtx, eventmodels.ProduceImmediate, topic1.Event(key1, myType{"ID": key1}))
 		if err != nil {
 			t.Logf("got error trying to produce: %v", err)
 			return false, err

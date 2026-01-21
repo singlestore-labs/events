@@ -26,7 +26,7 @@ func DeadLetterTopic(unprefixedTopic string, consumerGroup ConsumerGroupName) st
 // startDeadLetterConsumers checks the handlers to see if any of them have onFailure set to
 // use dead letter handling and if so creates the dead letter topics and starts dead letter
 // consumers.
-func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(ctx context.Context, consumerGroup consumerGroupName, originalGroup *group, limiter *limit, allStarted *sync.WaitGroup, allDone *sync.WaitGroup) {
+func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(startupCtx context.Context, baseCtx context.Context, consumerGroup consumerGroupName, originalGroup *group, limiter *limit, allStarted *sync.WaitGroup, groupDone *sync.WaitGroup) {
 	preCreate := make([]string, 0, len(originalGroup.topics))
 	for topic, topicHandler := range originalGroup.topics {
 		var doCreate bool
@@ -55,10 +55,10 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(ctx context.Context, co
 	}
 	// This shouldn't error because the precreate for the non-dead letter versions
 	// succeeded before this was called
-	err := lib.precreateTopicsForConsuming(ctx, consumerGroup, preCreate)
+	err := lib.precreateTopicsForConsuming(startupCtx, consumerGroup, preCreate)
 	if err != nil {
-		if e := ctx.Err(); e == nil {
-			lib.tracer.Logf("[events] UNEXPECTED ERROR creating topics for dead letter consumption, not consuming dead letter topics: %+v", err)
+		if e := startupCtx.Err(); e == nil {
+			lib.logf(startupCtx, "[events] UNEXPECTED ERROR creating topics for dead letter consumption, not consuming dead letter topics: %+v", err)
 		}
 		return
 	}
@@ -101,12 +101,15 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(ctx context.Context, co
 		}
 	}
 	if startConsumer {
-		allStarted.Add(1)
-		allDone.Add(1)
 		if debugConsumeStartup {
-			lib.tracer.Logf("[events] Debug: consume startwait +1 for %s", consumerGroup+deadLetterGroupPostfix)
+			lib.logf(startupCtx, "[events] Debug: consume startwait +1 for %s", consumerGroup+deadLetterGroupPostfix)
 		}
-		go lib.startConsumingGroup(ctx, consumerGroup+deadLetterGroupPostfix, dlGroup, limiter, false, allStarted, allDone, true, nil, nil, nil)
+		allStarted.Add(1)
+		if debugShutdown {
+			lib.logf(startupCtx, "[events] Debug shutdown: allDone/groupDone +1 for %s", consumerGroup+deadLetterGroupPostfix)
+		}
+		groupDone.Add(1)
+		go lib.startConsumingGroup(startupCtx, baseCtx, consumerGroup+deadLetterGroupPostfix, dlGroup, limiter, false, allStarted, groupDone, true, nil, nil, nil)
 	}
 }
 
@@ -119,15 +122,15 @@ func (lib *Library[ID, TX, DB]) produceToDeadLetter(ctx context.Context, consume
 		err := lib.writer.WriteMessages(ctx, msg)
 		if err == nil {
 			if failures > 0 {
-				lib.tracer.Logf("[events] finally produced dead letter message (%s/%s) to Kafka after %d failure(s)", msg.Topic, string(msg.Key), failures)
+				lib.logf(ctx, "[events] finally produced dead letter message (%s/%s) to Kafka after %d failure(s)", msg.Topic, string(msg.Key), failures)
 			} else {
-				lib.tracer.Logf("[events] produced dead letter message (%s/%s) to Kafka", msg.Topic, string(msg.Key))
+				lib.logf(ctx, "[events] produced dead letter message (%s/%s) to Kafka", msg.Topic, string(msg.Key))
 			}
 			DeadLetterProduceCounts.WithLabelValues(handlerName, originalTopic).Inc()
 			return
 		}
 		failures++
-		_ = lib.RecordErrorNoWait("produceEvents", errors.Errorf("cannot produce dead letter message (%s/%s, %d failures) to Kafka: %w", msg.Topic, string(msg.Key), failures, err))
+		_ = lib.RecordErrorNoWait(ctx, "produceEvents", errors.Errorf("cannot produce dead letter message (%s/%s, %d failures) to Kafka: %w", msg.Topic, string(msg.Key), failures, err))
 		if !backoff.Continue(b) {
 			return
 		}

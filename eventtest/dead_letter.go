@@ -93,7 +93,6 @@ func DeadLetterTest[
 	testPrefix string,
 	libraryPrefix Prefix,
 ) {
-	defer cancel()
 	baseT := t
 	t = ntest.ExtraDetailLogger(t, string(libraryPrefix)+testPrefix)
 	type deliveryInfoBlock struct {
@@ -116,9 +115,14 @@ func DeadLetterTest[
 	lib := events.New[ID, TX, DB]()
 	lib.SkipNotifierSupport()
 	lib.SetPrefix(string(libraryPrefix))
+	lib.SetTracerConfig(GetTracerConfig(t))
 	if !IsNilDB(conn) {
 		conn.AugmentWithProducer(lib)
 	}
+	tracerCtx := TracerContext(ctx, t)
+	defer lib.Shutdown(tracerCtx)
+	defer CatchPanic(t)
+	defer cancel()
 	topic := eventmodels.BindTopic[myType](Name(t) + "Topic")
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
 	deadLetterTopic := eventmodels.BindTopic[myType](events.DeadLetterTopic(Name(t)+"Topic", consumerGroup))
@@ -152,7 +156,7 @@ func DeadLetterTest[
 	lib.ConsumeIdempotent(consumerGroup, onFailure, Name(t)+"CIH", topic.Handler(mkHandler("first")), events.WithTimeout(configuredTimeout))
 
 	firstCtx, cancelFirst := context.WithCancel(ctx)
-	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, string(libraryPrefix)+testPrefix+"1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, TracerProvider(baseT, string(libraryPrefix)+testPrefix+"1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	firstDone := lib.StartConsumingOrPanic(firstCtx)
 
 	body := myType{
@@ -160,11 +164,11 @@ func DeadLetterTest[
 	}
 	t.Logf("producing message 1 %s", id1)
 	t.Log("deliver ie expected to be attempted, but it will fail")
-	require.NoError(t, lib.Produce(ctx, eventmodels.ProduceImmediate, topic.Event(id1, body).ID(id1)))
+	require.NoError(t, lib.Produce(tracerCtx, eventmodels.ProduceImmediate, topic.Event(id1, body).ID(id1)))
 
 	WaitFor(ctx, t, "first delivery", firstSignal, DeliveryTimeout)
 	t.Log("sleeping... (delivery should happen during this sleep)")
-	time.Sleep(configuredTimeout + LongerOnCI(time.Second*2, time.Minute, time.Second*20))
+	time.Sleep(configuredTimeout + LongerOnCI(time.Second*5, time.Minute, time.Second*20))
 	t.Log("delivery should have failed by now")
 	cancelFirst()
 	WaitFor(ctx, t, "first events library shutdown", firstDone, DeliveryTimeout)
@@ -173,13 +177,16 @@ func DeadLetterTest[
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SkipNotifierSupport()
 	lib2.SetPrefix(string(libraryPrefix))
+	lib2.SetTracerConfig(GetTracerConfig(t))
 	if onFailure == eventmodels.OnFailureSave {
 		t.Log("second events library is consuming directly from the dead letter topic")
 		lib2.ConsumeIdempotent(consumerGroup, eventmodels.OnFailureBlock, Name(t)+"DLd", deadLetterTopic.Handler(mkHandler("deadLetterDirect")), events.WithTimeout(configuredTimeout))
 	} else {
 		lib2.ConsumeIdempotent(consumerGroup, onFailure, Name(t)+"CIH", topic.Handler(mkHandler("second")), events.WithTimeout(configuredTimeout))
 	}
-	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, string(libraryPrefix)+testPrefix+"2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, TracerProvider(baseT, string(libraryPrefix)+testPrefix+"2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	defer lib2.Shutdown(tracerCtx)
+	defer CatchPanic(t)
 	// this assignment is thread-safe because lib1 is completely shut down and lib2 hasn't started yet
 	secondSignal := make(chan struct{})
 	signal = &secondSignal

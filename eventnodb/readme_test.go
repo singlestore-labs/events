@@ -8,6 +8,7 @@ import (
 	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/singlestore-labs/events/eventnodb"
 	"github.com/singlestore-labs/events/eventtest"
+	"github.com/singlestore-labs/events/eventtest/eventtestutil"
 )
 
 func TestReadmeCompiles(t *testing.T) {
@@ -15,5 +16,5 @@ func TestReadmeCompiles(t *testing.T) {
 	brokers := []string(eventtest.KafkaBrokers(t))
 
 	eventLib := events.New[eventmodels.BinaryEventID, *eventnodb.NoDBTx, *eventnodb.NoDB]()
-	eventLib.Configure(nil, t, false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	eventLib.Configure(nil, eventtestutil.TracerProvider(t, ""), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 }
