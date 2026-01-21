@@ -52,11 +52,16 @@ func EventUnfilteredNotifierTest[
 	t = ntest.ExtraDetailLogger(origT, string(prefix)+"UNT")
 	lib := events.New[ID, TX, DB]()
 	lib.SetPrefix(string(prefix))
+	lib.SetTracerConfig(GetTracerConfig(t))
 	if !IsNilDB(conn) {
 		lib.SetEnhanceDB(true)
 		conn.AugmentWithProducer(lib)
 	}
-	lib.Configure(conn, ntest.ExtraDetailLogger(origT, string(prefix)+"UNT-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, TracerProvider(origT, string(prefix)+"UNT-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+
+	tracerCtx := TracerContext(ctx, t)
+	defer lib.Shutdown(tracerCtx)
+	defer CatchPanic(t)
 
 	consumeDone := lib.StartConsumingOrPanic(ctx)
 
@@ -65,7 +70,7 @@ func EventUnfilteredNotifierTest[
 	id := uuid.New().String()
 	t.Log("producing may take a few tries for brand new topics")
 	require.NoError(t, wait.For(func() (bool, error) {
-		err := lib.Produce(ctx, eventmodels.ProduceImmediate, unfilteredNotifierTopic.Event("key-"+id,
+		err := lib.Produce(tracerCtx, eventmodels.ProduceImmediate, unfilteredNotifierTopic.Event("key-"+id,
 			myNotifierEvent{"foo": "bar"}).ID(id))
 		if err != nil {
 			t.Logf("got error trying to produce: %v", err)
@@ -151,8 +156,9 @@ func EventComprehensiveNotifierTest[
 	lib := events.New[ID, TX, DB]()
 	lib.SetEnhanceDB(true)
 	lib.SetPrefix(string(prefix))
+	lib.SetTracerConfig(GetTracerConfig(t))
 	conn.AugmentWithProducer(lib)
-	lib.Configure(conn, ntest.ExtraDetailLogger(origT, string(prefix)+"TEN-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, TracerProvider(origT, string(prefix)+"TEN-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 
 	// slowCtx is for the library
 	slowCtx, slowCtxCancel := context.WithCancel(ctx)
@@ -161,6 +167,8 @@ func EventComprehensiveNotifierTest[
 	require.NoError(t, err)
 
 	consumeDone := lib.StartConsumingOrPanic(slowCtx)
+
+	slowTracerCtx := TracerContext(slowCtx, t)
 
 	// ctx will be used for the threads
 	ctx, cancelCtx := context.WithCancel(ctx)
@@ -245,7 +253,7 @@ func EventComprehensiveNotifierTest[
 			t.Logf("sending event %s (%d) with permission from %s", id, i%4, perm)
 			sendTime := time.Now()
 			var txTime time.Duration // we won't count this
-			require.NoErrorf(t, conn.Transact(slowCtx, func(tx TX) error {
+			require.NoErrorf(t, conn.Transact(slowTracerCtx, func(tx TX) error {
 				start := time.Now()
 				tx.Produce(notifierTopic.Event(id, myNotifierEvent{
 					"id":      id,

@@ -88,9 +88,11 @@ func runTest[ID eventmodels.AbstractID[ID], TX eventmodels.EnhancedTX, DB Augmen
 
 	t.Log("consumer/producer started")
 
+	tracerCtx := TracerContext(ctx, t)
+
 	t.Log("producing may take a few tries for brand new topics")
 	require.NoError(t, wait.For(func() (bool, error) {
-		err := lib.Produce(ctx, eventmodels.ProduceImmediate, events...)
+		err := lib.Produce(tracerCtx, eventmodels.ProduceImmediate, events...)
 		if err != nil {
 			t.Logf("got error trying to produce: %v", err)
 			return false, err
@@ -149,8 +151,9 @@ func batchTestCommon[
 	}
 	topic := eventmodels.BindTopicTx[map[string]string, ID, TX, DB](Name(t) + "Topic")
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
+	lib.SetTracerConfig(GetTracerConfig(t))
 
-	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, string(libraryPrefix)+logPrefix+"-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, TracerProvider(baseT, string(libraryPrefix)+logPrefix+"-L"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 
 	// Generate test events
 	toSend := make([]eventmodels.ProducingEvent, eventsToSend)

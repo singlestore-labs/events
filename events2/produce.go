@@ -103,15 +103,8 @@ func (c *Connection[TX, DB]) AugmentWithProducer(producer eventmodels.Producer[e
 // The methods that Connection supports are all done with stubs so that the underlying implementations can be
 // reused by other implementations of AbstractDB.
 
-func (c Connection[TX, DB]) tracer() eventmodels.Tracer {
-	if c.producer != nil {
-		return c.producer.Tracer()
-	}
-	return nil
-}
-
 func (c *Connection[TX, DB]) Transact(ctx context.Context, f func(TX) error) error {
-	return eventdb.Transact[eventmodels.BinaryEventID, TX, *Connection[TX, DB]](ctx, c, c.tracer(), f, SaveEventsInsideTx[TX], c.producer)
+	return eventdb.Transact[eventmodels.BinaryEventID, TX, *Connection[TX, DB]](ctx, c, f, SaveEventsInsideTx[TX], c.producer)
 }
 
 func (c *Connection[TX, DB]) LockOrError(ctx context.Context, key uint32, timeout time.Duration) (unlock func() error, err error) {
@@ -123,15 +116,15 @@ func (c *Connection[TX, DB]) ProduceSpecificTxEvents(ctx context.Context, ids []
 }
 
 func (c *Connection[TX, DB]) ProduceDroppedTxEvents(ctx context.Context, batchSize int) (int, error) {
-	return ProduceDroppedTxEvents[TX, *Connection[TX, DB]](ctx, c, batchSize, c.tracer(), c.producer)
+	return ProduceDroppedTxEvents[TX, *Connection[TX, DB]](ctx, c, batchSize, c.producer)
 }
 
 func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
 }
 
-func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tracer eventmodels.Tracer, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
-	return SaveEventsInsideTx[TX](ctx, tracer, tx, c.producer, events...)
+func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
+	return SaveEventsInsideTx[TX](ctx, tx, c.producer, events...)
 }
 
 func LockOrError[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](
@@ -176,7 +169,6 @@ func LockOrError[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](
 				FROM	eventLocks
 				WHERE	lockName = ?
 				FOR UPDATE`, lockString).Scan(&ignored)
-
 			if err != nil {
 				ereturn <- err
 				return err
@@ -212,7 +204,7 @@ func ProduceSpecificTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransa
 	return count, err
 }
 
-func ProduceDroppedTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ctx context.Context, db DB, batchSize int, tracer eventmodels.Tracer, producer eventmodels.Producer[eventmodels.BinaryEventID, TX]) (int, error) {
+func ProduceDroppedTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ctx context.Context, db DB, batchSize int, producer eventmodels.Producer[eventmodels.BinaryEventID, TX]) (int, error) {
 	if producer == nil {
 		return 0, errors.Errorf("attempt to produce dropped events with a connection not augmented with a producer")
 	}
@@ -223,14 +215,14 @@ func ProduceDroppedTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransac
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			if debugging {
-				producer.Tracer().Logf("[events] Catch-up background producer found no pending events")
+				producer.TracerProvider(ctx)("[events] Catch-up background producer found no pending events")
 			}
 			return totalCount, nil
 		case err != nil:
-			_ = producer.RecordError("produceStoredEvents", err)
+			_ = producer.RecordError(ctx, "produceStoredEvents", err)
 			return totalCount, err
 		default:
-			tracer.Logf("[events] Catch-up background producer sent %d events", count)
+			producer.TracerProvider(ctx)("[events] Catch-up background producer sent %d events", count)
 			if count == 0 {
 				return totalCount, nil
 			}
@@ -363,9 +355,12 @@ func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, t
 
 // SaveEventsInsideTx is meant to be used inside a transaction to persist
 // events as part of that transaction.
-func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer eventmodels.Tracer, tx TX, producer eventmodels.CanValidateTopics, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
+func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tx TX, producer eventmodels.Producer[eventmodels.BinaryEventID, TX], events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
 	if len(events) == 0 {
 		return nil, nil
+	}
+	if producer == nil {
+		return nil, errors.Errorf("attempt to save events inside tx without a producer")
 	}
 	err := eventdb.ValidateEventTopics(ctx, producer, events...)
 	if err != nil {
@@ -391,16 +386,14 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tracer e
 		}
 		ib = ib.Values(id, i+1, event.GetTopic(), event.GetTimestamp().UTC().Format("2006-01-02 15:04:05.000000"), event.GetKey(), enc, headersEnc)
 	}
-	if tracer != nil {
-		tracer.Logf("[events] saving %d events as part of a transaction, example topic: '%s'", len(events), events[0].GetTopic())
-	}
+	producer.TracerProvider(ctx)("[events] saving %d events as part of a transaction, example topic: '%s'", len(events), events[0].GetTopic())
 	sql, args, err := ib.PlaceholderFormat(sq.Question).ToSql()
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 	_, err = tx.ExecContext(ctx, sql, args...)
 	if err != nil {
-		tracer.Logf("[SaveEventsInsideTx] could not insert event: %s: %s", sql, err)
+		producer.TracerProvider(ctx)("[SaveEventsInsideTx] could not insert event: %s: %s", sql, err)
 		return nil, errors.WithStack(err)
 	}
 	return ids, nil

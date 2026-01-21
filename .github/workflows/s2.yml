@@ -108,6 +108,7 @@ jobs:
           export EVENTS_DEBUG_CONSUME="true"
           export EVENTS_DEBUG_START_CONSUME="true"
           export EVENTS_DEBUG_BATCHING="true"
+          export EVENTS_TEST_VERBOSE_SPANS="true"
           go test -coverprofile=coverage1.txt -covermode=atomic -coverpkg=github.com/singlestore-labs/events/... -v ./events2/... 
           export EVENTS_DEBUG_NOTIFY="false"
           export EVENTS_DEBUG_PRODUCE="false"
@@ -116,6 +117,7 @@ jobs:
           export EVENTS_DEBUG_CONSUME="false"
           export EVENTS_DEBUG_START_CONSUME="false"
           export EVENTS_DEBUG_BATCHING="false"
+          export EVENTS_TEST_VERBOSE_SPANS="false"
           go test -coverprofile=coverage2.txt -covermode=atomic -coverpkg=github.com/singlestore-labs/events/... ./events2/... 
           cat coverage1.txt coverage2.txt > coverage.txt
 

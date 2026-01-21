@@ -13,8 +13,10 @@ import (
 	"github.com/memsql/errors"
 	"github.com/memsql/ntest"
 	"github.com/segmentio/kafka-go"
+
 	"github.com/singlestore-labs/events"
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/events/eventtest/eventtestutil"
 	"github.com/singlestore-labs/wait"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,12 +45,14 @@ func BroadcastDeliveryTest[
 	lib1 := events.New[ID, TX, DB]()
 	lib1.SetEnhanceDB(true)
 	lib1.SetPrefix(string(prefix))
+	lib1.SetTracerConfig(GetTracerConfig(t))
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SetEnhanceDB(true)
 	lib2.SetPrefix(string(prefix))
+	lib2.SetTracerConfig(GetTracerConfig(t))
 
-	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"TBDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"TBDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib1.Configure(conn, TracerProvider(baseT, string(prefix)+"TBDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, TracerProvider(baseT, string(prefix)+"TBDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	if !IsNilDB(conn) {
 		conn.AugmentWithProducer(lib1)
 	}
@@ -114,6 +118,11 @@ func BroadcastDeliveryTest[
 		assert.True(t, strings.HasPrefix(lib1.GetBroadcastConsumerGroupName(), "broadcastConsumer-"), "consumer prefix") // defaultBroadcastConsumerBaseName
 	}
 
+	tracerCtx := TracerContext(ctx, t)
+	defer lib1.Shutdown(tracerCtx)
+	defer lib2.Shutdown(tracerCtx)
+	defer CatchPanic(t)
+
 	// Clean up when done
 	defer func() {
 		t.Log("cancel")
@@ -126,7 +135,7 @@ func BroadcastDeliveryTest[
 	}()
 
 	t.Log("Send test message")
-	require.NoError(t, lib1.Produce(ctx, eventmodels.ProduceImmediate, topic.Event("key-"+id, MyEvent{
+	require.NoError(t, lib1.Produce(tracerCtx, eventmodels.ProduceImmediate, topic.Event("key-"+id, MyEvent{
 		S: "broadcast-test",
 	}).
 		ID(id).
@@ -205,16 +214,24 @@ func IdempotentDeliveryTest[
 	lib1.SetEnhanceDB(true)
 	lib1.SkipNotifierSupport()
 	lib1.SetPrefix(string(prefix))
+	lib1.SetTracerConfig(GetTracerConfig(t))
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SetEnhanceDB(true)
 	lib2.SkipNotifierSupport()
 	lib2.SetPrefix(string(prefix))
+	lib2.SetTracerConfig(GetTracerConfig(t))
 
-	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"TIDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"TIDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib1.Configure(conn, TracerProvider(baseT, string(prefix)+"TIDT-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, TracerProvider(baseT, string(prefix)+"TIDT-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	if !IsNilDB(conn) {
 		conn.AugmentWithProducer(lib1)
 	}
+
+	tracerCtx := TracerContext(ctx, t)
+
+	defer lib1.Shutdown(tracerCtx)
+	defer lib2.Shutdown(tracerCtx)
+	defer CatchPanic(t)
 
 	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t) + "Topic")
 	lib1.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
@@ -285,7 +302,7 @@ func IdempotentDeliveryTest[
 	}()
 
 	t.Log("Send test message")
-	require.NoError(t, lib1.Produce(ctx, eventmodels.ProduceImmediate, topic.Event("key-"+id, MyEvent{
+	require.NoError(t, lib1.Produce(tracerCtx, eventmodels.ProduceImmediate, topic.Event("key-"+id, MyEvent{
 		S: "idempotent-test",
 	}).
 		ID(id).
@@ -373,13 +390,20 @@ func ExactlyOnceDeliveryTest[
 	lib1.SetEnhanceDB(true)
 	lib1.SkipNotifierSupport()
 	lib1.SetPrefix(string(prefix))
+	lib1.SetTracerConfig(GetTracerConfig(t))
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SetEnhanceDB(true)
 	lib2.SkipNotifierSupport()
 	lib2.SetPrefix(string(prefix))
+	lib2.SetTracerConfig(GetTracerConfig(t))
 
-	lib1.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"TEOD-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
-	lib2.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"TEOD-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	tracerCtx := TracerContext(ctx, t)
+	defer lib1.Shutdown(tracerCtx)
+	defer lib2.Shutdown(tracerCtx)
+	defer CatchPanic(t)
+
+	lib1.Configure(conn, TracerProvider(baseT, string(prefix)+"TEOD-1"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib2.Configure(conn, TracerProvider(baseT, string(prefix)+"TEOD-2"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	conn.AugmentWithProducer(lib1)
 
 	topic := eventmodels.BindTopicTx[MyEvent, ID, TX, DB](Name(t) + "Topic")
@@ -449,6 +473,12 @@ func ExactlyOnceDeliveryTest[
 		<-produceDone
 		t.Log("done waits")
 	}()
+
+	ctx, spanDone := eventtestutil.GetTracerConfig(t).BeginSpan(ctx, map[string]string{
+		"action": "test",
+		"test":   t.Name(),
+	})
+	defer spanDone()
 
 	// Send test message
 	require.NoErrorf(t, conn.Transact(ctx, func(tx TX) error {
@@ -536,6 +566,7 @@ func CloudEventEncodingTest[
 
 	topic := eventmodels.BindTopic[myEvent](Name(t) + "Topic")
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: topic.Topic()})
+	lib.SetTracerConfig(GetTracerConfig(t))
 
 	lib.ConsumeIdempotent(events.NewConsumerGroup(Name(t)+"-idptnA"), eventmodels.OnFailureBlock, Name(t), topic.Handler(
 		func(ctx context.Context, e eventmodels.Event[myEvent]) error {
@@ -546,8 +577,11 @@ func CloudEventEncodingTest[
 			return nil
 		}))
 
-	lib.Configure(conn, t, false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.Configure(conn, TracerProvider(t, ""), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	done := lib.StartConsumingOrPanic(ctx)
+
+	defer lib.Shutdown(TracerContext(ctx, t))
+	defer CatchPanic(t)
 
 	defer func() {
 		t.Log("cancel")

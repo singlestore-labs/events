@@ -24,7 +24,6 @@ import (
 
 	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/singlestore-labs/events/internal"
-	"github.com/singlestore-labs/events/internal/multi"
 	"github.com/singlestore-labs/events/internal/pwork"
 )
 
@@ -100,7 +99,6 @@ type LibraryNoDB struct {
 	// Global broker caps
 	sizeCapBrokerLock       sync.Mutex // protects changes to sizeCapBrokerState
 	sizeCapBrokerState      atomic.Int32
-	sizeCapBrokerLoadCtx    *multi.Context
 	sizeCapBrokerReady      chan struct{}
 	sizeCapDefaultAssumed   int64                                    // anything smaller than this can be sent before knowing actual limits
 	sizeCapBrokerMessageMax atomic.Int64                             // message.max.bytes (0 unknown)
@@ -110,8 +108,9 @@ type LibraryNoDB struct {
 
 	// Per-topic limits map (separate from creatingTopic). Keys are topic names.
 
+	tracerProvider            eventmodels.TracerProvider
+	tracerConfig              eventmodels.TracerConfig
 	hasDB                     atomic.Bool
-	tracer                    eventmodels.Tracer
 	brokers                   []string
 	writer                    *kafka.Writer
 	readers                   map[consumerGroupName]*group
@@ -141,8 +140,13 @@ type LibraryNoDB struct {
 	lazyProduce               bool
 	skipNotifier              bool
 	prefix                    string // prefixes all topics and consumer groups
+	consumeCtx                context.Context
+	produceCtx                context.Context
+	libraryDone               sync.WaitGroup
 
 	// lock must be held when....
+	//
+	// reading/writing consumeCtx and produceCtx
 	//
 	// "ready" is isNotConfigured or isConfigured:
 	// - writing to most of the fields of Library (calls to Configure)
@@ -171,6 +175,7 @@ const (
 	isNotConfigured = 0
 	isConfigured    = 1
 	isRunning       = 2
+	isShutdown      = 3
 )
 
 type group struct {
@@ -254,9 +259,10 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 			topicsHaveBeenListed:     make(chan struct{}),
 			sizeCapBrokerReady:       make(chan struct{}),
 			sizeCapDefaultAssumed:    1_000_000,
-			sizeCapBrokerLoadCtx:     multi.New(),
+			tracerProvider:           func(context.Context) eventmodels.Tracer { return log.Printf },
 		},
 	}
+	lib.SetTracerConfig(eventmodels.TracerConfig{})
 	lib.configureTopicsPrework()
 	lib.configureSizeCapPrework()
 	return &lib
@@ -355,6 +361,21 @@ func (lib *Library[ID, TX, DB]) SetSizeCapLowerLimit(sizeCapDefaultAssumed int64
 	lib.sizeCapDefaultAssumed = sizeCapDefaultAssumed
 }
 
+// SetTracerConfig configures tracer behavior.  Any blank value will default to
+// doing nothing
+func (lib *Library[ID, TX, DB]) SetTracerConfig(config eventmodels.TracerConfig) {
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	lib.tracerConfig = config
+	n := func() {}
+	if lib.tracerConfig.BeginSpan == nil {
+		lib.tracerConfig.BeginSpan = func(ctx context.Context, _ map[string]string) (context.Context, func()) { return ctx, n }
+	}
+	if lib.tracerConfig.Handle == nil {
+		lib.tracerConfig.Handle = func(ctx context.Context, _ bool, _ string, _ *kafka.Message) (context.Context, func()) { return ctx, n }
+	}
+}
+
 // Configure sets up the Library so that it has the configuration it needs to run.
 // The database connection is optional. Without it, certain features will always error:
 //
@@ -362,16 +383,20 @@ func (lib *Library[ID, TX, DB]) SetSizeCapLowerLimit(sizeCapDefaultAssumed int64
 //	StartConsuming requires a database if ConsumeExactlyOnce has been called
 //
 // The conn parameter may be nil, in which case CatchUpProduce() and ProduceFromTable() will error.
+// The TracerProvider may be nil. If so, logs will use the base log.Printf
 //
 // It is required that Configure be called exactly once before any consumers are started or
 // messages are produced.
 // Calling this after consumers have started or messages are being produced will panic.
-func (lib *Library[ID, TX, DB]) Configure(conn DB, tracer eventmodels.Tracer, mustRegisterTopics bool, saslMechanism sasl.Mechanism, tlsConfig *TLSConfig, brokers []string) {
+func (lib *Library[ID, TX, DB]) Configure(conn DB, tracerProvider eventmodels.TracerProvider, mustRegisterTopics bool, saslMechanism sasl.Mechanism, tlsConfig *TLSConfig, brokers []string) {
 	if !lib.skipNotifier {
 		processRegistrationTodo(lib) // before taking lock to avoid deadlock
 	}
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
+	if tracerProvider != nil {
+		lib.tracerProvider = tracerProvider
+	}
 	lib.mustNotBeRunning("attempt configure event library that is already processing")
 	lib.ready.Store(isConfigured)
 	if !internal.IsNil(conn) {
@@ -384,26 +409,30 @@ func (lib *Library[ID, TX, DB]) Configure(conn DB, tracer eventmodels.Tracer, mu
 	lib.brokers = brokers
 	if saslMechanism != nil {
 		lib.mechanism = saslMechanism
-		if tracer != nil {
-			tracer.Logf("[events] configured with SASL %T", saslMechanism)
-		}
 	}
 	if tlsConfig != nil {
 		lib.tlsConfig = tlsConfig.Config
-		if tracer != nil {
-			tracer.Logf("[events] configured with TLS override")
-		}
 	}
-	lib.tracer = tracer
 	lib.mustRegisterTopics = mustRegisterTopics
 }
 
-func (lib *Library[ID, TX, DB]) start(str string, args ...any) error {
+func (lib *Library[ID, TX, DB]) start(ctx context.Context, str string, args ...any) (err error) {
+	defer func() {
+		// in defer so it doesn't hold the lock
+		if lib.mechanism != nil {
+			lib.logf(ctx, "[events] configured with SASL %T", lib.mechanism)
+		}
+		if lib.tlsConfig != nil {
+			lib.logf(ctx, "[events] configured with TLS override")
+		}
+	}()
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
 	switch lib.ready.Load() {
 	case isNotConfigured:
 		return errors.Alertf("attempt to %s when library has not been configured", fmt.Sprintf(str, args...))
+	case isShutdown:
+		return errors.Alertf("attempt to %s when library has been shutdown", fmt.Sprintf(str, args...))
 	case isRunning:
 		return nil
 	}
@@ -416,6 +445,42 @@ func (lib *Library[ID, TX, DB]) start(str string, args ...any) error {
 	})
 	lib.ready.Store(isRunning)
 	return nil
+}
+
+// Shutdown returns when the library is completely shut down.
+// If consumers were never started and a catch up producer was
+// never started, then produce may return before background threads
+// created by produce have completed. Shutdown does not cancel
+// the consume or catch-up-producer contects.
+func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
+	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, map[string]string{
+		"action": "wait for shutdown",
+	})
+	defer spanDone()
+	consumeNotCancelled := false
+	produceNotCancelled := false
+	if func() bool {
+		defer lib.lock.Unlock()
+		lib.lock.Lock()
+		lib.ready.Store(isShutdown)
+		if lib.consumeCtx != nil && lib.consumeCtx.Err() == nil {
+			consumeNotCancelled = true
+		}
+		if lib.produceCtx != nil && lib.produceCtx.Err() == nil {
+			produceNotCancelled = true
+		}
+		return lib.consumeCtx != nil || lib.produceCtx != nil
+	}() {
+		if consumeNotCancelled {
+			lib.tracerProvider(ctx)("[events] Shutdown called when the consume context has not been cancelled")
+		}
+		if produceNotCancelled {
+			lib.tracerProvider(ctx)("[events] Shutdown called when the catch up producer context has not been cancelled")
+		}
+		// only wait if consumers or catch-up-producer
+		// was started
+		lib.libraryDone.Wait()
+	}
 }
 
 func (lib *Library[ID, TX, DB]) ConfigureBroadcastHeartbeat(dur time.Duration) {
@@ -551,12 +616,12 @@ func WithQueueDepthLimit(n int) HandlerOpt {
 		r.queueLimit = n
 		r.limit = simultaneous.New[eventLimiterType](n).SetForeverMessaging(
 			limiterStuckMessageAfter,
-			func() {
-				lib.tracer.Logf("[events] Handler %s in consumer group %s for topic %s has been waiting for more than %s for a chance to run and is stuck",
+			func(ctx context.Context) {
+				lib.logf(ctx, "[events] Handler %s in consumer group %s for topic %s has been waiting for more than %s for a chance to run and is stuck",
 					r.name, r.consumerGroup, r.handler.GetTopic(), limiterStuckMessageAfter)
 			},
-			func() {
-				lib.tracer.Logf("[events] Handler %s in consumer group %s for topic %s is no longer stuck",
+			func(ctx context.Context) {
+				lib.logf(ctx, "[events] Handler %s in consumer group %s for topic %s is no longer stuck",
 					r.name, r.consumerGroup, r.handler.GetTopic())
 			},
 		)
@@ -652,19 +717,16 @@ func (lib *Library[ID, TX, DB]) getTopicHandler(consumerGroupName ConsumerGroupN
 func (h *registeredHandler) Name() string          { return h.name }
 func (h *registeredHandler) BaseTopic() string     { return h.baseTopic }
 func (h *registeredHandler) ConsumerGroup() string { return h.consumerGroup.String() }
+func (h *registeredHandler) IsDeadLetter() bool    { return h.isDeadLetter }
 
-func (lib *LibraryNoDB) RecordErrorNoWait(category string, err error) error {
+func (lib *LibraryNoDB) RecordErrorNoWait(ctx context.Context, category string, err error) error {
 	ErrorCounts.WithLabelValues(category).Inc()
-	if lib.tracer != nil {
-		lib.tracer.Logf("[events] %s error: %+v", category, err)
-	} else {
-		log.Printf("[events] %s error: %+v", category, err)
-	}
+	lib.logf(ctx, "[events] %s error: %+v", category, err)
 	return errors.Alertf("events error %s: %w", category, err)
 }
 
-func (lib *LibraryNoDB) RecordError(category string, err error) error {
-	err = lib.RecordErrorNoWait(category, err)
+func (lib *LibraryNoDB) RecordError(ctx context.Context, category string, err error) error {
+	err = lib.RecordErrorNoWait(ctx, category, err)
 	time.Sleep(errorSleep)
 	return err
 }
@@ -672,8 +734,13 @@ func (lib *LibraryNoDB) RecordError(category string, err error) error {
 // IsConfigured reports if the library exists and has been configured
 func (lib *Library[ID, TX, DB]) IsConfigured() bool { return lib.ready.Load() >= isConfigured }
 
+// These methods implement LibraryInterface
 func (lib *Library[ID, TX, DB]) DB() eventmodels.AbstractDB[ID, TX] { return lib.db }
-func (lib *Library[ID, TX, DB]) Tracer() eventmodels.Tracer         { return lib.tracer }
+
+func (lib *Library[ID, TX, DB]) TracerProvider(ctx context.Context) eventmodels.Tracer {
+	return lib.tracerProvider(ctx)
+}
+func (lib *Library[ID, TX, DB]) TracerConfig() eventmodels.TracerConfig { return lib.tracerConfig }
 
 // getController returns a client talking to the controlling broker. The
 // controller is needed for certain requests, like creating a topic
@@ -711,7 +778,7 @@ func (lib *LibraryNoDB) findABroker(ctx context.Context, f func(*kafka.Conn) err
 		broker := lib.brokers[i]
 		conn, err := dialer.DialContext(ctx, "tcp", broker)
 		if err != nil {
-			lib.tracer.Logf("[events] could not connect to broker %d (of %d) %s: %v", i+1, len(lib.brokers), broker, err)
+			lib.logf(ctx, "[events] could not connect to broker %d (of %d) %s: %v", i+1, len(lib.brokers), broker, err)
 			if tried == len(lib.brokers) {
 				// last broker, give up
 				return errors.Errorf("event library dial kafka broker (%s): %w", broker, err)
@@ -809,7 +876,8 @@ func (g *group) maxQueueLimit() int {
 }
 
 func (lib *Library[ID, TX, DB]) mustNotBeRunning(message string) {
-	if lib.ready.Load() == isRunning {
+	switch lib.ready.Load() {
+	case isRunning, isShutdown:
 		panic(errors.Alertf("%s", message))
 	}
 }
@@ -872,4 +940,52 @@ type libraryInterface[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, 
 
 func (lib libraryInterface[ID, TX, DB]) RemovePrefix(topicOrConsumerGroup string) string {
 	return lib.removePrefix(topicOrConsumerGroup)
+}
+
+func (lib *LibraryNoDB) logf(ctx context.Context, format string, a ...any) {
+	lib.tracerProvider(ctx)(format, a...)
+}
+
+// threadContext cancels the returned context at the earlier of:
+// - when the returned done() func is called
+// - when both consume and catch-up-produce are cancelled
+// The returned context has a span. It is cancelled when the
+// returned done is called.
+// The provided context is only used if there is no consume and
+// no catch-up-produce invocation.
+func (lib *LibraryNoDB) threadContext(backupCtx context.Context, spanMap map[string]string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, spanMap)
+	waitFor := make([]context.Context, 0, 2)
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	if lib.consumeCtx != nil {
+		waitFor = append(waitFor, lib.consumeCtx)
+	}
+	if lib.produceCtx != nil {
+		waitFor = append(waitFor, lib.produceCtx)
+	}
+	if len(waitFor) == 0 {
+		waitFor = append(waitFor, backupCtx)
+	}
+	lib.libraryDone.Add(1)
+	go func() {
+		defer lib.libraryDone.Done()
+		defer cancel()
+		for len(waitFor) > 0 {
+			select {
+			case <-ctx.Done():
+				// done function used
+				return
+			case <-waitFor[0].Done():
+				waitFor = waitFor[1:]
+			}
+		}
+		// we don't call spanDone yet -- we wait for the cancel to
+		// cause the done function to be called
+	}()
+	return ctx, func() {
+		cancel()
+		spanDone()
+	}
 }

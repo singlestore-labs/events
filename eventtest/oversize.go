@@ -34,8 +34,17 @@ func OversizeSendTest[
 	lib.SetEnhanceDB(true)
 	lib.SetSizeCapLowerLimit(1000)
 	lib.SetPrefix(string(prefix))
+	lib.SetTracerConfig(GetTracerConfig(t))
 
-	lib.Configure(conn, ntest.ExtraDetailLogger(baseT, string(prefix)+"OST"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	tracerCtx := TracerContext(ctx, t)
+	defer func() {
+		t.Log("waiting for lib shutdown")
+		lib.Shutdown(tracerCtx)
+		t.Log("done waiting for lib shutdown")
+	}()
+	defer CatchPanic(t)
+
+	lib.Configure(conn, TracerProvider(baseT, string(prefix)+"OST"), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 	if !IsNilDB(conn) {
 		conn.AugmentWithProducer(lib)
 	}
@@ -82,7 +91,7 @@ func OversizeSendTest[
 	t.Log("Attempt to send test messages...")
 
 	t.Log("Attempt to send medium to Topic3 (should fail)")
-	require.ErrorIs(t, lib.Produce(ctx, eventmodels.ProduceImmediate, topic3.Event("key-3m-"+id, MyEvent{
+	require.ErrorIs(t, lib.Produce(tracerCtx, eventmodels.ProduceImmediate, topic3.Event("key-3m-"+id, MyEvent{
 		S: mediumText,
 	}).
 		ID("3m-"+id).
@@ -90,7 +99,7 @@ func OversizeSendTest[
 		Time(now)), events.ErrTooBig)
 
 	t.Log("Attempt to send medium to Topic2 (should succeed)")
-	require.NoError(t, lib.Produce(ctx, eventmodels.ProduceImmediate, topic2.Event("key-2m-"+id, MyEvent{
+	require.NoError(t, lib.Produce(tracerCtx, eventmodels.ProduceImmediate, topic2.Event("key-2m-"+id, MyEvent{
 		S: mediumText,
 	}).
 		ID("2m-"+id).
@@ -98,7 +107,7 @@ func OversizeSendTest[
 		Time(now)))
 
 	t.Log("Attempt to send large to Topic2 (should fail)")
-	require.ErrorIs(t, lib.Produce(ctx, eventmodels.ProduceImmediate, topic2.Event("key-2l-"+id, MyEvent{
+	require.ErrorIs(t, lib.Produce(tracerCtx, eventmodels.ProduceImmediate, topic2.Event("key-2l-"+id, MyEvent{
 		S: largeText,
 	}).
 		ID("2l-"+id).
@@ -106,7 +115,7 @@ func OversizeSendTest[
 		Time(now)), events.ErrTooBig)
 
 	t.Log("Attempt to send large to Topic1 (should succeed)")
-	require.NoError(t, lib.Produce(ctx, eventmodels.ProduceImmediate, topic1.Event("key-1l-"+id, MyEvent{
+	require.NoError(t, lib.Produce(tracerCtx, eventmodels.ProduceImmediate, topic1.Event("key-1l-"+id, MyEvent{
 		S: largeText,
 	}).
 		ID("1l-"+id).

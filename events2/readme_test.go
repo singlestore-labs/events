@@ -10,6 +10,7 @@ import (
 	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/singlestore-labs/events/events2"
 	"github.com/singlestore-labs/events/eventtest"
+	"github.com/singlestore-labs/events/eventtest/eventtestutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,5 +33,5 @@ func TestReadmeCompiles(t *testing.T) {
 		DB: db,
 	}, "lockPrefix")
 
-	eventLib.Configure(conn, t, false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	eventLib.Configure(conn, eventtestutil.TracerProvider(t, ""), false, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
 }

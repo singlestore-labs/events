@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/memsql/errors"
+	"github.com/segmentio/kafka-go"
 )
 
 // The DB layers are complex. The challenge is that there are low-level things
@@ -48,26 +49,33 @@ type AbstractIDMethods interface {
 // Producer is implemented by events.Library. It's an interface so that
 // import cycles can be avoided.
 type Producer[ID AbstractID[ID], TX AbstractTX] interface {
-	CanValidateTopics
 	DB() AbstractDB[ID, TX]
 	Produce(context.Context, ProduceMethod, ...ProducingEvent) error
 	// ProduceFromTable should be called by transaction wappers. It will
 	// send ids to a central thread that will in turn call ProduceSpecificTxEvents.
 	ProduceFromTable(ctx context.Context, eventIDs map[string][]ID) error
-	RecordError(string, error) error       // pauses to avoid spamming
-	RecordErrorNoWait(string, error) error // does not pause
+	RecordError(context.Context, string, error) error       // pauses to avoid spamming
+	RecordErrorNoWait(context.Context, string, error) error // does not pause
 	IsConfigured() bool
-	Tracer() Tracer
 	ValidateTopics(context.Context, []string) error
+	TracerProvider(context.Context) Tracer
 }
 
-type CanValidateTopics interface {
-	ValidateTopics(context.Context, []string) error
+// TracerConfig is how tracing becomes richer. All fields are optional. Additional fields may be
+// added in the future. BeginSpan/DoneSpan will wrap many things. The returned funcs are for
+// noting the end of the span/handle/thread etc.
+type TracerConfig struct {
+	BeginSpan func(context.Context, map[string]string) (context.Context, func())            // start of a span. All logs are inside spans.
+	Handle    func(context.Context, bool, string, *kafka.Message) (context.Context, func()) // string is the handler name, bool is true for deadletter delivery
 }
 
-type Tracer interface {
-	Logf(string, ...any)
-}
+// Tracer is a Logf/Printf signature
+type Tracer func(string, ...any)
+
+// TracerProvider is a minimal logger-from-context function. Given a context,
+// it returns a Logf. Logging behavior can be significantly enhanced with
+// SetTracerConfig().
+type TracerProvider func(context.Context) Tracer
 
 type AbstractTX interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)

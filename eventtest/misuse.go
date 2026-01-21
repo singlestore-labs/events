@@ -38,7 +38,12 @@ func ErrorWhenMisusedTest[
 	lib.SkipNotifierSupport()
 	lib.SetEnhanceDB(true)
 	lib.SetPrefix(string(prefix))
-	lib.Configure(conn, t, true, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+	lib.SetTracerConfig(GetTracerConfig(t))
+	lib.Configure(conn, TracerProvider(t, ""), true, events.SASLConfigFromString(os.Getenv("KAFKA_SASL")), nil, brokers)
+
+	tracerCtx := TracerContext(ctx, t)
+	defer lib.Shutdown(tracerCtx)
+	defer CatchPanic(t)
 
 	goodTopic := eventmodels.BindTopic[myEvent](Name(t) + "-good")
 	badTopic := eventmodels.BindTopic[myEvent](Name(t) + "-bad")
@@ -46,7 +51,7 @@ func ErrorWhenMisusedTest[
 	lib.SetTopicConfig(kafka.TopicConfig{Topic: goodTopic.Topic()})
 
 	startTime := time.Now()
-	require.NoError(t, conn.Transact(ctx, func(tx TX) error {
+	require.NoError(t, conn.Transact(tracerCtx, func(tx TX) error {
 		return nil
 	}))
 	duration := time.Since(startTime)
@@ -55,7 +60,7 @@ func ErrorWhenMisusedTest[
 
 	t.Log("The bad topics should be rejected before the catch-up-producer is started")
 	startTime = time.Now()
-	require.Error(t, conn.Transact(ctx, func(tx TX) error {
+	require.Error(t, conn.Transact(tracerCtx, func(tx TX) error {
 		tx.Produce(badTopic.Event("irrelevant", myEvent{"foo": "bar"}).
 			ID("doesn't matter"),
 		)
@@ -71,7 +76,7 @@ func ErrorWhenMisusedTest[
 
 	t.Log("The bad topics should be rejected after the catch-up-producer is started")
 	startTime = time.Now()
-	require.Error(t, conn.Transact(ctx, func(tx TX) error {
+	require.Error(t, conn.Transact(tracerCtx, func(tx TX) error {
 		tx.Produce(badTopic.Event("irrelevant", myEvent{"foo": "bar"}).
 			ID("doesn't matter"),
 		)
@@ -83,20 +88,25 @@ func ErrorWhenMisusedTest[
 	require.Lessf(t, duration, time.Second, "tx should be fast, not %s", duration)
 
 	t.Log("immediate produce will check the topic and should error")
-	require.Error(t, lib.Produce(ctx, eventmodels.ProduceImmediate, badTopic.Event("irrelevant",
+	require.Error(t, lib.Produce(tracerCtx, eventmodels.ProduceImmediate, badTopic.Event("irrelevant",
 		myEvent{"foo": "bar"}).ID("also doesn't matter")),
 		"immediate with bad topic")
 
 	lib2 := events.New[ID, TX, DB]()
 	lib2.SkipNotifierSupport()
 	lib2.SetPrefix(string(prefix))
+	lib2.SetTracerConfig(GetTracerConfig(t))
 	lib2.ConsumeIdempotent(events.NewConsumerGroup("consumerGroup"), eventmodels.OnFailureBlock, "handler", goodTopic.Handler(func(_ context.Context, event eventmodels.Event[myEvent]) error {
 		return nil
 	}))
 	_, _, err = lib2.StartConsuming(ctx)
 	require.Errorf(t, err, "start consuming w/o configured events")
+	defer lib2.Shutdown(tracerCtx)
+	defer CatchPanic(t)
 
+	t.Log("about to cancel, this may happen before startup is complete")
 	cancel()
 	t.Log("waiting for catch up produce to complete")
 	<-produceDone
+	t.Log("done")
 }

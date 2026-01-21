@@ -85,8 +85,8 @@ github.com/singlestore-labs/generic v0.5.0 h1:YlWevDHXPxYnIaN/nH+LSW5N4pvP5JGztQ
 github.com/singlestore-labs/generic v0.5.0/go.mod h1:EYP3HOfc9BcytHJMwwQsc99fR6EXxCd13B1egFCF3BQ=
 github.com/singlestore-labs/once v0.0.1 h1:GGfXqAm1+Aywxo2fSNBgMWN+8H/M/VpbbPgVN8Berto=
 github.com/singlestore-labs/once v0.0.1/go.mod h1:2f063S0jPlp6Qll5WdwwXIJ6I3OJYdTZtlUQ5zBvrJQ=
-github.com/singlestore-labs/simultaneous v0.0.1 h1:bg+zTtvXRqo2FoI3XK+dhbO7wwtiEJdVuJZ6rsaJYoM=
-github.com/singlestore-labs/simultaneous v0.0.1/go.mod h1:zSfRmOousCV1LrZh07Bbzi2teIO2iA+ny7yIxv26EXs=
+github.com/singlestore-labs/simultaneous v0.1.0 h1:OxCJXZHOHL2nmxrOyQ/dP9/tNlMp7B8hhZnm5a8Y9Oc=
+github.com/singlestore-labs/simultaneous v0.1.0/go.mod h1:pzFUq2thrYzVYveIsTAH/uM8JcZUv5OcoZAAW15UkMA=
 github.com/singlestore-labs/wait v0.0.1 h1:PRZLFyvjUS19pv3JEzI8WLC+Qi0MF5uejllDceN/PUU=
 github.com/singlestore-labs/wait v0.0.1/go.mod h1:BpLnI81ryzROG0ms0KXdglq9xF3FaF0I8+y3QEexbEQ=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=

@@ -17,6 +17,7 @@ package pwork
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,14 +25,14 @@ import (
 	"github.com/lestrrat-go/backoff/v2"
 	"github.com/memsql/errors"
 	"github.com/muir/gwrap"
-	"github.com/singlestore-labs/events/internal/multi"
 )
 
 // Work provides the parameters for the jobs to be done.
 // Except where marked, all parameters are optional.
 type Work[Item comparable, Why any] struct {
-	MaxSimultaneous int            // required
-	BackoffPolicy   backoff.Policy // required
+	MaxSimultaneous int                                                                // required
+	BackoffPolicy   backoff.Policy                                                     // required
+	ThreadContext   func(context.Context, map[string]string) (context.Context, func()) // required
 
 	// ItemWork is required if ItemsWork is nil
 	ItemWork func(context.Context, Item, Why) error // called to do the work in a background thread.
@@ -45,20 +46,22 @@ type Work[Item comparable, Why any] struct {
 
 	// everything below is optional
 
-	WorkDeadline     time.Duration                                       // how long to work on all items
-	ItemRetryDelay   time.Duration                                       // how long to wait before retrying a specific item
-	ErrorReporter    func(context.Context, error, Why)                   // called to report errors
-	IsFatalError     func(error) bool                                    // called in WorkUntilDone to bail out early.
-	ClearedUp        func(context.Context, error, Why, []Item)           // called when prior errors are resolved
-	FirstWorkMessage func(context.Context, Why, Item)                    // called when there is work to be done
-	NotRetryingError func(context.Context, Item, Why, error) error       // called when an item will not be retried, perhaps too soon
-	RetryingOrNot    func(context.Context, bool, Item, Why)              // called before ItemWork, only if previously failed
-	ItemPreWork      func(context.Context, Item, Why) error              // called before doing the work
-	ItemDone         func(context.Context, Item, Why)                    // called on success
-	ItemFailed       func(context.Context, Item, Why, error, bool) error // called on failure
-	ItemTimeoutError func(context.Context, Item, Why, error) error       // called on timeout
-	ItemPending      func(context.Context, Item, Why)                    // called if will be or is being processed
-	PreWork          func(context.Context, Why, []Item) error            // called before starting per-item work
+	WorkDeadline     time.Duration                                        // how long to work on all items
+	ItemRetryDelay   time.Duration                                        // how long to wait before retrying a specific item
+	ErrorReporter    func(context.Context, error, Why)                    // called to report errors
+	IsFatalError     func(error) bool                                     // called in WorkUntilDone to bail out early.
+	ClearedUp        func(context.Context, error, Why, []Item)            // called when prior errors are resolved
+	FirstWorkMessage func(context.Context, Why, Item)                     // called when there is work to be done
+	NotRetryingError func(context.Context, Item, Why, error) error        // called when an item will not be retried, perhaps too soon
+	RetryingOrNot    func(context.Context, bool, Item, Why)               // called before ItemWork, only if previously failed
+	ItemPreWork      func(context.Context, Item, Why) error               // called before doing the work
+	ItemDone         func(context.Context, Item, Why)                     // called on success
+	ItemFailed       func(context.Context, Item, Why, error, bool) error  // called on failure
+	ItemTimeoutError func(context.Context, Item, Why, error) error        // called on timeout
+	ItemPending      func(context.Context, Item, Why)                     // called if will be or is being processed
+	PreWork          func(context.Context, Why, []Item) error             // called before starting per-item work
+	SpanMapItem      func(context.Context, Item, Why) map[string]string   // called to generated span context before calling ItemWork
+	SpanMapItems     func(context.Context, []Item, Why) map[string]string // called to generated span context before calling ItemsWork
 
 	progressStore     gwrap.SyncMap[Item, *itemProgress]
 	simultaneousLimit chan struct{}
@@ -99,7 +102,6 @@ type itemProgress struct {
 	processing chan struct{} // closed when when request is finished
 	error      error
 	errorTime  time.Time
-	ctx        *multi.Context
 }
 
 func (w *Work[Item, Why]) GetState(item Item) ItemState {
@@ -113,7 +115,6 @@ func (w *Work[Item, Why]) GetState(item Item) ItemState {
 func (w *Work[Item, Why]) SetDone(item Item) {
 	n := &itemProgress{
 		processing: make(chan struct{}),
-		ctx:        multi.New(),
 	}
 	close(n.processing)
 	n.state.Store(int32(ItemDone))
@@ -123,6 +124,9 @@ func (w *Work[Item, Why]) SetDone(item Item) {
 	}
 }
 
+// WorkUntilDone iterates calls to Work until the task is complete, a fatal error is received,
+// or the context is cancelled.
+// backgroundCtx is used for all spawned go-routines. This includes all the actual work callbacks.
 func (w *Work[Item, Why]) WorkUntilDone(ctx context.Context, items []Item, why Why) error {
 	var priorError error
 	b := w.BackoffPolicy.Start(ctx)
@@ -147,8 +151,10 @@ func (w *Work[Item, Why]) WorkUntilDone(ctx context.Context, items []Item, why W
 	}
 }
 
+// Work makes one attempt to get things done.
+// backgroundCtx is used for all spawned go-routines. This includes all the actual work callbacks.
 func (w *Work[Item, Why]) Work(ctx context.Context, items []Item, why Why) error {
-	handleResult := func(item Item, seen *itemProgress, err error) {
+	handleResult := func(ctx context.Context, item Item, seen *itemProgress, err error) {
 		now := time.Now()
 		// This function exists so that the lock is held for a minimal time
 		done := func() bool {
@@ -224,7 +230,6 @@ func (w *Work[Item, Why]) Work(ctx context.Context, items []Item, why Why) error
 			seen, ok = w.progressStore.LoadOrStore(item,
 				&itemProgress{
 					processing: make(chan struct{}),
-					ctx:        multi.New(),
 				})
 		}
 		state := ItemState(seen.state.Load())
@@ -279,16 +284,27 @@ func (w *Work[Item, Why]) Work(ctx context.Context, items []Item, why Why) error
 					continue
 				}
 			}
-			seen.ctx.Add(ctx)
 			if w.ItemWork != nil {
 				err := getSlot(item)
 				if err != nil {
 					return err
 				}
+				var spanMap map[string]string
+				if w.SpanMapItem != nil {
+					spanMap = w.SpanMapItem(ctx, item, why)
+				} else {
+					spanMap = map[string]string{
+						"action": "thread",
+						"thread": "complete one item",
+						"item":   fmt.Sprint(item),
+					}
+				}
+				threadCtx, threadDone := w.ThreadContext(ctx, spanMap)
 				go func() {
+					defer threadDone()
 					defer releaseSlot()
-					err := w.ItemWork(seen.ctx, item, why)
-					handleResult(item, seen, err)
+					err := w.ItemWork(threadCtx, item, why)
+					handleResult(threadCtx, item, seen, err)
 				}()
 			} else {
 				todo = append(todo, item)
@@ -303,14 +319,24 @@ func (w *Work[Item, Why]) Work(ctx context.Context, items []Item, why Why) error
 		outstanding[item] = seen
 	}
 	if w.ItemWork == nil && len(todo) != 0 {
-		anySeen, _ := w.progressStore.Load(todo[0])
 		err := getSlot(todo[0])
 		if err != nil {
 			return err
 		}
+		var spanMap map[string]string
+		if w.SpanMapItems != nil {
+			spanMap = w.SpanMapItems(ctx, todo, why)
+		} else {
+			spanMap = map[string]string{
+				"action": "thread",
+				"thread": fmt.Sprintf("complete %d items", len(todo)),
+			}
+		}
+		threadCtx, threadDone := w.ThreadContext(ctx, spanMap)
 		go func() {
+			defer threadDone()
 			defer releaseSlot()
-			errs := w.ItemsWork(anySeen.ctx, todo, why)
+			errs := w.ItemsWork(threadCtx, todo, why)
 			for i, item := range todo {
 				seen, _ := w.progressStore.Load(item)
 				var err error
@@ -324,7 +350,7 @@ func (w *Work[Item, Why]) Work(ctx context.Context, items []Item, why Why) error
 				default:
 					err = errors.Errorf("unknown result, internal error, length of error return does not match")
 				}
-				handleResult(item, seen, err)
+				handleResult(threadCtx, item, seen, err)
 			}
 		}()
 	}

@@ -34,18 +34,19 @@ type ComboDB[ID eventmodels.AbstractID[ID], TX BasicTX] interface {
 	eventmodels.AbstractDB[ID, TX]
 }
 
-type SaveEventsFunc[ID eventmodels.AbstractID[ID], TX BasicTX] func(context.Context, eventmodels.Tracer, TX, eventmodels.CanValidateTopics, ...eventmodels.ProducingEvent) (map[string][]ID, error)
+type SaveEventsFunc[ID eventmodels.AbstractID[ID], TX BasicTX] func(context.Context, TX, eventmodels.Producer[ID, TX], ...eventmodels.ProducingEvent) (map[string][]ID, error)
 
 // Transact implements a Transact method as needed by AbstractDB (in ComboDB).
 // It does not call itself recursively and insteads depends upon BeginTx
 // from BasicDB (in ComboDB).
 func Transact[ID eventmodels.AbstractID[ID], TX BasicTX, DB ComboDB[ID, TX]](
-	ctx context.Context, db DB, tracer eventmodels.Tracer,
+	ctx context.Context,
+	db DB,
 	f func(TX) error,
 	saveEvents SaveEventsFunc[ID, TX],
 	producer eventmodels.Producer[ID, TX],
 ) error {
-	ids, err := WrapTransaction[ID, TX, DB](ctx, db, tracer, f, saveEvents, producer)
+	ids, err := WrapTransaction[ID, TX, DB](ctx, db, f, saveEvents, producer)
 	if err != nil {
 		return err
 	}
@@ -63,7 +64,8 @@ func Transact[ID eventmodels.AbstractID[ID], TX BasicTX, DB ComboDB[ID, TX]](
 // implementations. It handles the Begin/Rollback/Commit sequence and saving
 // events.
 func WrapTransaction[ID eventmodels.AbstractID[ID], TX BasicTX, DB BasicDB[TX]](
-	ctx context.Context, db DB, tracer eventmodels.Tracer,
+	ctx context.Context,
+	db DB,
 	f func(TX) error,
 	saveEvents SaveEventsFunc[ID, TX],
 	producer eventmodels.Producer[ID, TX],
@@ -100,7 +102,7 @@ func WrapTransaction[ID eventmodels.AbstractID[ID], TX BasicTX, DB BasicDB[TX]](
 			if err != nil {
 				return err
 			}
-			ids, err = saveEvents(ctx, tracer, tx, producer, pending...)
+			ids, err = saveEvents(ctx, tx, producer, pending...)
 			if err != nil {
 				return err
 			}
@@ -110,9 +112,9 @@ func WrapTransaction[ID eventmodels.AbstractID[ID], TX BasicTX, DB BasicDB[TX]](
 	return ids, err
 }
 
-func ValidateEventTopics(
+func ValidateEventTopics[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX](
 	ctx context.Context,
-	producer eventmodels.CanValidateTopics,
+	producer eventmodels.Producer[ID, TX],
 	events ...eventmodels.ProducingEvent,
 ) error {
 	if producer == nil {

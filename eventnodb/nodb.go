@@ -69,7 +69,7 @@ func New() *Library {
 	}
 }
 
-func (lib *Library) ConfigureNoDB(tracer eventmodels.Tracer, mustRegisterTopics bool, saslMechanism sasl.Mechanism, tlsConfig *events.TLSConfig, brokers []string) {
+func (lib *Library) ConfigureNoDB(tracer eventmodels.TracerProvider, mustRegisterTopics bool, saslMechanism sasl.Mechanism, tlsConfig *events.TLSConfig, brokers []string) {
 	//nolint:staticcheck // QF1008: could remove embedded field "Library" from selector
 	lib.Library.Configure(nil, tracer, mustRegisterTopics, saslMechanism, tlsConfig, brokers)
 }
