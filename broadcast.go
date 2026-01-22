@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/rand"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,7 +45,7 @@ func (lib *Library[ID, TX, DB]) consumeBroadcast(startupCtx context.Context, bas
 		return err
 	}
 	limiter := simultaneous.New[eventLimiterType](maximumParallelConsumption)
-	broadcastConsumerGroup, reader, readerConfig, unlock, err := lib.getBroadcastConsumerGroup(startupCtx, broadcastStartupMaxWait)
+	broadcastConsumerGroup, reader, readerConfig, unlock, err := lib.getBroadcastConsumerGroup(startupCtx, broadcastStartupMaxWait, allStarted)
 	if err != nil {
 		return err
 	}
@@ -52,7 +53,7 @@ func (lib *Library[ID, TX, DB]) consumeBroadcast(startupCtx context.Context, bas
 	return nil
 }
 
-func (lib *Library[ID, TX, DB]) getBroadcastConsumerGroup(ctx context.Context, maxWait time.Duration) (_ consumerGroupName, reader *kafka.Reader, readerConfig *kafka.ReaderConfig, unlock func() error, err error) {
+func (lib *Library[ID, TX, DB]) getBroadcastConsumerGroup(ctx context.Context, maxWait time.Duration, optStartupWG *sync.WaitGroup) (_ consumerGroupName, reader *kafka.Reader, readerConfig *kafka.ReaderConfig, unlock func() error, err error) {
 	idAllocator := newIDAllocator(startingMaxLockID, maxLockIDMinIncrement, maxLockIDMinMultiplier, lib.broadcastConsumerMaxLock)
 	startTime := time.Now()
 	defer func() {
@@ -119,6 +120,13 @@ NewGroup:
 				}
 				continue
 			}
+			if optStartupWG != nil {
+				if debugConsumeStartup {
+					lib.logf(ctx, "[events] Debug: start wait for stability for %s", broadcastConsumerGroup)
+				}
+				optStartupWG.Add(1)
+				go lib.waitForStability(ctx, optStartupWG, broadcastConsumerGroup)
+			}
 			break
 		}
 		break
@@ -147,7 +155,7 @@ func (lib *Library[ID, TX, DB]) refreshBroadcastReader(ctx context.Context, broa
 			*unlock = nil
 		}
 		// We're not going to give up on getting a new consumer group.
-		consumerGroupName, reader, readerConfig, newUnlock, err := lib.getBroadcastConsumerGroup(ctx, time.Hour*24*365*10)
+		consumerGroupName, reader, readerConfig, newUnlock, err := lib.getBroadcastConsumerGroup(ctx, time.Hour*24*365*10, nil)
 		if err != nil {
 			return "", nil, nil, err
 		}
@@ -182,10 +190,20 @@ func (lib *Library[ID, TX, DB]) getBroadcastReader(ctx context.Context, broadcas
 		// context was cancelled
 		return nil, nil, errors.WithStack(err)
 	}
+	resp, err := lib.describeGroup(ctx, broadcastConsumerGroup)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(resp.Members) == 1 {
+		lib.logf(ctx, "[events] confirmed exactly one member of consumer group %s, using it", broadcastConsumerGroup)
+		return reader, readerConfig, nil
+	}
+	return nil, nil, errGroupUnavailable.Errorf("not exactly one (%d) member of group (%s)", len(resp.Members), broadcastConsumerGroup)
+}
 
-	b := backoffPolicy.Start(ctx)
-
+func (lib *Library[ID, TX, DB]) describeGroup(ctx context.Context, broadcastConsumerGroup consumerGroupName) (*kafka.DescribeGroupsResponseGroup, error) {
 	prefixedBroadcastConsumerGroup := lib.addPrefix(string(broadcastConsumerGroup))
+	b := backoffPolicy.Start(ctx)
 FreshClient:
 	for {
 		// We need a new client. Either the group was deleted and thus the broker may have changed,
@@ -198,12 +216,12 @@ FreshClient:
 			// perfect
 		case isTransientCoordinatorError(err):
 			if !backoff.Continue(b) {
-				return nil, nil, errors.Errorf("could not start broadcast consumer, failed to get coordinator for group (%s): %w", broadcastConsumerGroup, err)
+				return nil, errors.Errorf("could not start broadcast consumer, failed to get coordinator for group (%s): %w", broadcastConsumerGroup, err)
 			}
 			_ = lib.RecordErrorNoWait(ctx, "timeout-consume-broadcast", errors.Errorf("failed to get coordinator for group (%s): %w", broadcastConsumerGroup, err))
 			continue FreshClient
 		default:
-			return nil, nil, err
+			return nil, err
 		}
 
 		// We check the number of readers with describe
@@ -216,40 +234,73 @@ FreshClient:
 		if err != nil {
 			if errors.Is(err, kafka.RequestTimedOut) {
 				if !backoff.Continue(b) {
-					return nil, nil, errors.Errorf("could not start broadcast consumer, describe consumer group (%s): %w", broadcastConsumerGroup, err)
+					return nil, errors.Errorf("could not describe consumer group (%s): %w", broadcastConsumerGroup, err)
 				}
 				_ = lib.RecordErrorNoWait(ctx, "timeout-consume-broadcast", errors.Errorf("describe consumer group (%s) failed: %w", broadcastConsumerGroup, err))
 				continue FreshClient
 			}
-			return nil, nil, errors.Errorf("could not describe broadcast group: %w", err)
+			return nil, errors.Errorf("could not describe broadcast group: %w", err)
 		}
 		for _, resp := range describeResponse.Groups {
 			if resp.GroupID != prefixedBroadcastConsumerGroup {
-				return nil, nil, errors.Errorf("got a description for a group (%s) that wasn't what was asked for (%s)", resp.GroupID, broadcastConsumerGroup)
+				return nil, errors.Errorf("got a description for a group (%s) that wasn't what was asked for (%s)", resp.GroupID, broadcastConsumerGroup)
 			}
 			switch {
 			case resp.Error == nil:
 				// great!
 			case isTransientCoordinatorError(resp.Error):
 				if !backoff.Continue(b) {
-					return nil, nil, errors.Errorf("could not start broadcast consumer, describe consumer group (%s): %w", broadcastConsumerGroup, resp.Error)
+					return nil, errors.Errorf("could not start broadcast consumer, describe consumer group (%s): %w", broadcastConsumerGroup, resp.Error)
 				}
 				_ = lib.RecordErrorNoWait(ctx, "timeout-consume-broadcast", errors.Errorf("describe consumer group (%s) failed: %w", broadcastConsumerGroup, resp.Error))
 				// Try again to get a description
 				continue FreshClient
 			default:
-				return nil, nil, errors.WithStack(resp.Error)
+				return nil, errors.WithStack(resp.Error)
 			}
-			if len(resp.Members) == 1 {
-				lib.logf(ctx, "[events] confirmed exactly one member of consumer group %s, using it", broadcastConsumerGroup)
-				return reader, readerConfig, nil
-			}
-			return nil, nil, errGroupUnavailable.Errorf("not exactly one (%d) member of group (%s)", len(resp.Members), broadcastConsumerGroup)
+			return &resp, nil
 		}
 		if !backoff.Continue(b) {
-			return nil, nil, errors.Errorf("could not start broadcast consumer, describe consumer group (%s) did not include group", broadcastConsumerGroup)
+			return nil, errors.Errorf("could not describe consumer group response (%s) did not include group", broadcastConsumerGroup)
 		}
 		_ = lib.RecordErrorNoWait(ctx, "timeout-consume-broadcast", errors.Errorf("describe consumer group (%s) did not include group", broadcastConsumerGroup))
+		continue
+	}
+}
+
+// waitForStability will always return very quickly when running single-broker kafka
+// clusters like is done for testing this repo. When using real kafka clusters, it can
+// take a few seconds for groups to stabalize
+func (lib *Library[ID, TX, DB]) waitForStability(ctx context.Context, startupWG *sync.WaitGroup, broadcastConsumerGroup consumerGroupName) {
+	defer startupWG.Done()
+	if debugConsumeStartup {
+		defer lib.logf(ctx, "[events] Debug: done wait for stability for %s", broadcastConsumerGroup)
+	}
+	for {
+		resp, err := lib.describeGroup(ctx, broadcastConsumerGroup)
+		if err != nil {
+			if ctx.Err() != nil {
+				// context cancelled, let's bail
+				return
+			}
+			// this is an awkward situation, describe groups failed with a non-transient error
+			_ = lib.RecordError(ctx, "timeout-consume-broadcast", errors.Errorf("describe groups on %s failed with a non-transient error. Startup is incomplete: %+v", string(broadcastConsumerGroup), err))
+			continue
+		}
+		state := strings.TrimSpace(resp.GroupState)
+		if strings.EqualFold("Stable", state) {
+			// yay!
+			lib.logf(ctx, "[events] broadcast consumer group %s is %s", string(broadcastConsumerGroup), state)
+			return
+		}
+		lib.logf(ctx, "[events] broadcast consumer group %s is %s, waiting for it to be stable", string(broadcastConsumerGroup), state)
+		timer := time.NewTimer(groupStabilityWait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 		continue
 	}
 }
