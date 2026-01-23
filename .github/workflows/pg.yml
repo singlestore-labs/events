@@ -26,27 +26,6 @@ jobs:
         ports:
           - 5432:5432
           
-      kafka:
-        image: bitnamilegacy/kafka:3.6.2
-        env:
-          KAFKA_BROKER_ID: 1
-          KAFKA_CFG_NODE_ID: 1
-          KAFKA_CFG_PROCESS_ROLES: controller,broker
-          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
-          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-          KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
-          KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: false
-          KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-          KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-          KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: 1
-          KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-          KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-        ports:
-          - 9092:9092
-          - 9093:9093
-
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -94,10 +73,14 @@ jobs:
       - name: Build
         run: go build -v ./...
 
+      - name: Start Kafka (3 brokers)
+        id: kafka
+        uses: ./.github/actions/kafka-3-brokers
+
       - name: Test and Coverage
         env:
           EVENTS_POSTGRES_TEST_DSN: "postgres://postgres:postgres@localhost?sslmode=disable"
-          EVENTS_KAFKA_BROKERS: "localhost:9092"
+          EVENTS_KAFKA_BROKERS: ${{ steps.kafka.outputs.brokers }}
           # NTEST_BUFFERING: "false"
         run: |
           export EVENTS_DEBUG_NOTIFY="true"

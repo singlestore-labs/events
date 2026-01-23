@@ -37,6 +37,7 @@ const (
 	limiterStuckMessageAfter            = time.Minute
 	broadcastParallelConsumption        = 3
 	errorSleep                          = time.Second
+	groupStabilityWait                  = time.Second
 	baseBroadcastHeartbeat              = time.Second * 10
 	broadcastHeartbeatRandom            = 0.25
 	broadcastNotCoordinatorErrorRetries = 50

@@ -86,18 +86,13 @@ func (lib *Library[ID, TX, DB]) startConsuming(baseCtx context.Context, waitForS
 		}
 	}()
 	var lifetimeCtx context.Context
+	var doneLifetime func()
 	if debugConsumeStartup || debugShutdown {
-		var doneLifetime func()
 		lifetimeCtx, doneLifetime = lib.tracerConfig.BeginSpan(baseCtx, map[string]string{
 			"action": "consume lifetime",
 		})
 		defer func() {
-			if stopped != nil {
-				go func() {
-					<-stopped
-					doneLifetime()
-				}()
-			} else {
+			if err != nil {
 				doneLifetime()
 			}
 		}()
@@ -188,6 +183,9 @@ func (lib *Library[ID, TX, DB]) startConsuming(baseCtx context.Context, waitForS
 		allDone.Wait()
 		if debugConsumeStartup || debugShutdown {
 			lib.logf(lifetimeCtx, "[events] Debug shutdown: end allDone wait")
+		}
+		if doneLifetime != nil && err == nil {
+			doneLifetime()
 		}
 		close(doneChan)
 	}()

@@ -1,0 +1,112 @@
+name: "Start Kafka (3 brokers)"
+description: "Starts a 3-broker Kafka cluster (ZooKeeper mode) for GitHub Actions tests"
+
+outputs:
+  brokers:
+    description: "Space-separated broker list for clients on the runner"
+    value: ${{ steps.out.outputs.brokers }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Start ZooKeeper + Kafka(3)
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        NET="gha-kafka"
+        ZK="gha-zk"
+        K1="gha-kafka1"
+        K2="gha-kafka2"
+        K3="gha-kafka3"
+
+        # If a previous run left anything around, clean it up.
+        docker rm -f "$K1" "$K2" "$K3" "$ZK" >/dev/null 2>&1 || true
+        docker network rm "$NET" >/dev/null 2>&1 || true
+
+        docker network create "$NET"
+
+        docker run -d --name "$ZK" --network "$NET" \
+          -e ALLOW_ANONYMOUS_LOGIN=yes \
+          bitnamilegacy/zookeeper:3.9
+
+        # Common env for all brokers:
+        # - INTERNAL listener: used broker<->broker (reachable via service/container name on the docker network)
+        # - EXTERNAL listener: mapped to localhost:<port> for the test process running on the runner VM
+        common_env=(
+          -e ALLOW_PLAINTEXT_LISTENER=yes
+          -e KAFKA_CFG_ZOOKEEPER_CONNECT="$ZK:2181"
+          -e KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP="INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+          -e KAFKA_CFG_INTER_BROKER_LISTENER_NAME="INTERNAL"
+          -e KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR=3
+          -e KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=3
+          -e KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR=2
+          -e KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+        )
+
+        docker run -d --name "$K1" --network "$NET" \
+          -p 19092:19092 \
+          -e KAFKA_BROKER_ID=1 \
+          -e KAFKA_CFG_LISTENERS="INTERNAL://:9092,EXTERNAL://:19092" \
+          -e KAFKA_CFG_ADVERTISED_LISTENERS="INTERNAL://$K1:9092,EXTERNAL://localhost:19092" \
+          "${common_env[@]}" \
+          bitnamilegacy/kafka:3.6.2
+
+        docker run -d --name "$K2" --network "$NET" \
+          -p 29092:29092 \
+          -e KAFKA_BROKER_ID=2 \
+          -e KAFKA_CFG_LISTENERS="INTERNAL://:9092,EXTERNAL://:29092" \
+          -e KAFKA_CFG_ADVERTISED_LISTENERS="INTERNAL://$K2:9092,EXTERNAL://localhost:29092" \
+          "${common_env[@]}" \
+          bitnamilegacy/kafka:3.6.2
+
+        docker run -d --name "$K3" --network "$NET" \
+          -p 39092:39092 \
+          -e KAFKA_BROKER_ID=3 \
+          -e KAFKA_CFG_LISTENERS="INTERNAL://:9092,EXTERNAL://:39092" \
+          -e KAFKA_CFG_ADVERTISED_LISTENERS="INTERNAL://$K3:9092,EXTERNAL://localhost:39092" \
+          "${common_env[@]}" \
+          bitnamilegacy/kafka:3.6.2
+
+        echo "Waiting for Kafka to become ready..."
+        for i in {1..90}; do
+          if docker exec "$K1" bash -lc "\
+            if ! command -v /opt/bitnami/kafka/bin/kafka-topics.sh >/dev/null 2>&1; then
+              echo 'kafka-topics.sh not found in /opt/bitnami/kafka/bin' >&2
+              ls -la /opt/bitnami/kafka/bin >&2 || true
+              exit 127
+            fi
+            echo 'client.listener.name=INTERNAL' > /tmp/kafka-client.properties
+            /opt/bitnami/kafka/bin/kafka-topics.sh \
+              --bootstrap-server $K1:9092 \
+              --command-config /tmp/kafka-client.properties \
+              --list \
+              >/dev/null 2>&1
+          "; then
+            echo "Kafka ready."
+            exit 0
+          fi
+          if (( i % 10 == 0 )); then
+            echo "Kafka not ready yet (attempt $i)."
+            docker ps -a --filter "name=$K1" --filter "name=$K2" --filter "name=$K3" --filter "name=$ZK" || true
+            docker logs --tail 50 "$K1" || true
+            docker logs --tail 50 "$K2" || true
+            docker logs --tail 50 "$K3" || true
+          fi
+          sleep 2
+        done
+
+        echo "Kafka did not become ready in time."
+        docker ps -a || true
+        docker inspect "$ZK" "$K1" "$K2" "$K3" || true
+        docker logs "$ZK" || true
+        docker logs "$K1" || true
+        docker logs "$K2" || true
+        docker logs "$K3" || true
+        exit 1
+
+    - name: Emit brokers output
+      id: out
+      shell: bash
+      run: |
+        echo "brokers=localhost:19092 localhost:29092 localhost:39092" >> "$GITHUB_OUTPUT"
