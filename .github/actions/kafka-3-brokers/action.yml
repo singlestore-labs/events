@@ -3,7 +3,7 @@ description: "Starts a 3-broker Kafka cluster (ZooKeeper mode) for GitHub Action
 
 outputs:
   brokers:
-    description: "Comma-separated broker list for clients on the runner"
+    description: "Space-separated broker list for clients on the runner"
     value: ${{ steps.out.outputs.brokers }}
 
 runs:
