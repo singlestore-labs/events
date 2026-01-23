@@ -269,8 +269,6 @@ FreshClient:
 }
 
 // waitForStability will always return very quickly when running single-broker kafka
-// clusters like is done for testing this repo. When using real kafka clusters, it can
-// take a few seconds for groups to stabalize
 func (lib *Library[ID, TX, DB]) waitForStability(ctx context.Context, startupWG *sync.WaitGroup, broadcastConsumerGroup consumerGroupName) {
 	defer startupWG.Done()
 	if debugConsumeStartup {
