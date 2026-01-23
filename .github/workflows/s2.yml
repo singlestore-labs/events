@@ -43,7 +43,7 @@ jobs:
           mysql -u root -ptest -e "SET GLOBAL data_conversion_compatibility_level = '7.0'" -h 127.0.0.1
 
       - name: Check out repository code
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5
