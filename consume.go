@@ -184,7 +184,7 @@ func (lib *Library[ID, TX, DB]) startConsuming(baseCtx context.Context, waitForS
 		if debugConsumeStartup || debugShutdown {
 			lib.logf(lifetimeCtx, "[events] Debug shutdown: end allDone wait")
 		}
-		if doneLifetime != nil {
+		if doneLifetime != nil && err == nil {
 			doneLifetime()
 		}
 		close(doneChan)

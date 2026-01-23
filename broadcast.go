@@ -250,7 +250,7 @@ FreshClient:
 				// great!
 			case isTransientCoordinatorError(resp.Error):
 				if !backoff.Continue(b) {
-					return nil, errors.Errorf("could not start broadcast consumer, describe consumer group (%s): %w", broadcastConsumerGroup, resp.Error)
+					return nil, errors.Errorf("could not describe consumer group (%s): %w", broadcastConsumerGroup, resp.Error)
 				}
 				_ = lib.RecordErrorNoWait(ctx, "timeout-consume-broadcast", errors.Errorf("describe consumer group (%s) failed: %w", broadcastConsumerGroup, resp.Error))
 				// Try again to get a description
