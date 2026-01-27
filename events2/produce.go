@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -103,8 +104,16 @@ func (c *Connection[TX, DB]) AugmentWithProducer(producer eventmodels.Producer[e
 // The methods that Connection supports are all done with stubs so that the underlying implementations can be
 // reused by other implementations of AbstractDB.
 
+// backupTracer only needs to create a tracer if we don't have a producer.
+func (c Connection[TX, DB]) backupTracer() eventmodels.Tracer {
+	if c.producer == nil {
+		return log.Printf
+	}
+	return nil
+}
+
 func (c *Connection[TX, DB]) Transact(ctx context.Context, f func(TX) error) error {
-	return eventdb.Transact[eventmodels.BinaryEventID, TX, *Connection[TX, DB]](ctx, c, f, SaveEventsInsideTx[TX], c.producer)
+	return eventdb.Transact[eventmodels.BinaryEventID, TX, *Connection[TX, DB]](ctx, c, c.backupTracer(), f, SaveEventsInsideTx[TX], c.producer)
 }
 
 func (c *Connection[TX, DB]) LockOrError(ctx context.Context, key uint32, timeout time.Duration) (unlock func() error, err error) {
@@ -124,7 +133,7 @@ func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic
 }
 
 func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
-	return SaveEventsInsideTx[TX](ctx, tx, c.producer, events...)
+	return SaveEventsInsideTx[TX](ctx, c.backupTracer(), tx, c.producer, events...)
 }
 
 func LockOrError[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](
@@ -354,15 +363,13 @@ func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, t
 }
 
 // SaveEventsInsideTx is meant to be used inside a transaction to persist
-// events as part of that transaction.
-func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tx TX, producer eventmodels.Producer[eventmodels.BinaryEventID, TX], events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
+// events as part of that transaction. backupTracer is unused if producer is provided.
+// topics are unvalidated if a producer is not provided.
+func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, backupTracer eventmodels.Tracer, tx TX, optProducer eventmodels.Producer[eventmodels.BinaryEventID, TX], events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
-	if producer == nil {
-		return nil, errors.Errorf("attempt to save events inside tx without a producer")
-	}
-	err := eventdb.ValidateEventTopics(ctx, producer, events...)
+	err := eventdb.ValidateEventTopics(ctx, optProducer, events...)
 	if err != nil {
 		return nil, err
 	}
@@ -386,14 +393,18 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, tx TX, p
 		}
 		ib = ib.Values(id, i+1, event.GetTopic(), event.GetTimestamp().UTC().Format("2006-01-02 15:04:05.000000"), event.GetKey(), enc, headersEnc)
 	}
-	producer.TracerProvider(ctx)("[events] saving %d events as part of a transaction, example topic: '%s'", len(events), events[0].GetTopic())
+	tracer := backupTracer
+	if optProducer != nil {
+		tracer = optProducer.TracerProvider(ctx)
+	}
+	tracer("[events] saving %d events as part of a transaction, example topic: '%s'", len(events), events[0].GetTopic())
 	sql, args, err := ib.PlaceholderFormat(sq.Question).ToSql()
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 	_, err = tx.ExecContext(ctx, sql, args...)
 	if err != nil {
-		producer.TracerProvider(ctx)("[SaveEventsInsideTx] could not insert event: %s: %s", sql, err)
+		tracer("[SaveEventsInsideTx] could not insert event: %s: %s", sql, err)
 		return nil, errors.WithStack(err)
 	}
 	return ids, nil
