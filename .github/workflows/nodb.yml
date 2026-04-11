@@ -91,7 +91,7 @@ jobs:
           cat coverage1.txt coverage2.txt > coverage.txt
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           verbose: true
           fail_ci_if_error: true
