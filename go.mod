@@ -1,11 +1,11 @@
 module github.com/singlestore-labs/events
 
-go 1.23.0
+go 1.24.0
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
 	github.com/chrismcguire/gobberish v0.0.0-20150821175641-1d8adb509a0e
-	github.com/go-sql-driver/mysql v1.9.3
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/gofrs/uuid/v5 v5.4.0
 	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/backoff/v2 v2.0.8
@@ -28,7 +28,7 @@ require (
 )
 
 require (
-	filippo.io/edwards25519 v1.1.1 // indirect
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
