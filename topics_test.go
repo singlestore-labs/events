@@ -34,10 +34,9 @@ func TestTopicListingRetryWaitsForBackoffBeforeTryingAgain(t *testing.T) {
 	}
 	lib.Configure(nil, tracer, false, nil, nil, []string{"$$$invalid hostname$$$:1"})
 
-	done := make(chan struct{})
+	errCh := make(chan error, 1)
 	go func() {
-		defer close(done)
-		lib.listAvailableTopics(context.Background())
+		errCh <- lib.listAvailableTopics(context.Background())
 	}()
 
 	requireTopicListingLog(t, logs, "starting over on listing topics")
@@ -52,7 +51,10 @@ func TestTopicListingRetryWaitsForBackoffBeforeTryingAgain(t *testing.T) {
 
 	close(controller.done)
 	select {
-	case <-done:
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected topic listing to fail when backoff stops before success")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for topic listing to finish")
 	}
