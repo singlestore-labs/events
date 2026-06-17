@@ -250,27 +250,8 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 }
 
 func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) {
-	dialer := lib.dialer()
-	lib.listAvailableTopicsWith(ctx, func(listingCtx context.Context, broker string) ([]kafka.Partition, bool) {
-		conn, err := dialer.DialContext(listingCtx, "tcp", broker)
-		if err != nil {
-			lib.logf(ctx, "[events] could not connect to broker %s, was going to list topics: %v", broker, err)
-			return nil, false
-		}
-		defer func() {
-			_ = conn.Close()
-		}()
-		partitions, err := conn.ReadPartitions()
-		if err != nil {
-			lib.logf(ctx, "[events] could not list partitions on broker %s: %v", broker, err)
-			return nil, false
-		}
-		return partitions, true
-	})
-}
-
-func (lib *LibraryNoDB) listAvailableTopicsWith(ctx context.Context, listBroker func(context.Context, string) ([]kafka.Partition, bool)) {
 	defer close(lib.topicsHaveBeenListed)
+	dialer := lib.dialer()
 	listingCtx := context.WithoutCancel(ctx)
 	b := topicListingBackoffPolicy.Start(listingCtx)
 	for backoff.Continue(b) {
@@ -278,8 +259,17 @@ func (lib *LibraryNoDB) listAvailableTopicsWith(ctx context.Context, listBroker 
 		for _, i := range rand.Perm(len(lib.brokers)) {
 			broker := lib.brokers[i]
 			lib.logf(ctx, "[events] connecting to %s to list topics", broker)
-			partitions, ok := listBroker(listingCtx, broker)
-			if !ok {
+			conn, err := dialer.DialContext(listingCtx, "tcp", broker)
+			if err != nil {
+				lib.logf(ctx, "[events] could not connect to broker %s, was going to list topics: %v", broker, err)
+				continue
+			}
+			defer func() {
+				_ = conn.Close()
+			}()
+			partitions, err := conn.ReadPartitions()
+			if err != nil {
+				lib.logf(ctx, "[events] could not list partitions on broker %s: %v", broker, err)
 				continue
 			}
 			lib.logf(ctx, "[events] listing existing topics...")
