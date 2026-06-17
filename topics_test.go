@@ -32,7 +32,7 @@ func TestTopicListingRetryWaitsForBackoffBeforeTryingAgain(t *testing.T) {
 			logs <- fmt.Sprintf(format, a...)
 		}
 	}
-	lib.Configure(nil, tracer, false, nil, nil, []string{"${NODE_IP}:30992"})
+	lib.Configure(nil, tracer, false, nil, nil, []string{"$$$invalid hostname$$$:1"})
 
 	done := make(chan struct{})
 	go func() {
