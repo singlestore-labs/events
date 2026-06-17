@@ -10,6 +10,7 @@ import (
 	"github.com/memsql/errors"
 	"github.com/segmentio/kafka-go"
 
+	"github.com/singlestore-labs/codegate"
 	"github.com/singlestore-labs/events/internal/pwork"
 	"github.com/singlestore-labs/generic"
 )
@@ -34,12 +35,22 @@ const (
 	debugLogTopicsMissingPrefix = false
 )
 
-var topicListingBackoffPolicy = backoff.Exponential(
-	backoff.WithMinInterval(time.Second),
-	backoff.WithMaxInterval(time.Second*30),
-	backoff.WithJitterFactor(0.05),
-	backoff.WithMaxRetries(0),
-)
+// TODO: remove this code gate once infinite topic-listing retries are stable in production.
+var gateEventsTopicListingInfiniteRetries = codegate.New("EventsTopicListingInfiniteRetries")
+
+var topicListingBackoffPolicy = newTopicListingBackoffPolicy()
+
+func newTopicListingBackoffPolicy() backoff.Policy {
+	opts := []backoff.ExponentialOption{
+		backoff.WithMinInterval(time.Second),
+		backoff.WithMaxInterval(time.Second * 30),
+		backoff.WithJitterFactor(0.05),
+	}
+	if gateEventsTopicListingInfiniteRetries.Enabled() {
+		opts = append(opts, backoff.WithMaxRetries(0))
+	}
+	return backoff.Exponential(opts...)
+}
 
 // UnregisteredTopicError is the base error when attempting to create a
 // topic that isn't pre-preregistered when pre-registration is required.
