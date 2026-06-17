@@ -241,15 +241,14 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 	}
 }
 
-func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) {
-	defer close(lib.topicsHaveBeenListed)
+func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) error {
 	dialer := lib.dialer()
 	for {
 		lib.logf(ctx, "[events] starting over on listing topics")
 		for _, i := range rand.Perm(len(lib.brokers)) {
 			broker := lib.brokers[i]
 			lib.logf(ctx, "[events] connecting to %s to list topics", broker)
-			conn, err := dialer.Dial("tcp", broker)
+			conn, err := dialer.DialContext(ctx, "tcp", broker)
 			if err != nil {
 				lib.logf(ctx, "[events] could not connect to broker %s, was going to list topics: %v", broker, err)
 				continue
@@ -280,22 +279,37 @@ func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) {
 				lib.topicsWork.SetDone(unprefixedTopic)
 			}
 			lib.logf(ctx, "[events] done listing existing topics")
-			return
+			close(lib.topicsHaveBeenListed)
+			return nil
 		}
 		lib.logf(ctx, "[events] waiting before making another attempt to list topics")
+		timer := time.NewTimer(topicCreateSleepTime)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
 	}
 }
 
 func (lib *LibraryNoDB) waitForTopicsListing(ctx context.Context) error {
-	lib.topicListingStarted.Do(func() {
-		lib.listAvailableTopics(ctx)
-	})
 	select {
 	case <-lib.topicsHaveBeenListed:
 		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	default:
 	}
+
+	lib.topicListingLock.Lock()
+	defer lib.topicListingLock.Unlock()
+
+	select {
+	case <-lib.topicsHaveBeenListed:
+		return nil
+	default:
+	}
+
+	return lib.listAvailableTopics(ctx)
 }
 
 // CreateTopics orechestrates the creation of topics that have not already been successfully
