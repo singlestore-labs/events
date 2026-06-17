@@ -249,25 +249,21 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 	}
 }
 
-func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) {
-	defer close(lib.topicsHaveBeenListed)
+func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) error {
 	dialer := lib.dialer()
-	listingCtx := context.WithoutCancel(ctx)
-	b := topicListingBackoffPolicy.Start(listingCtx)
+	b := topicListingBackoffPolicy.Start(ctx)
 	for backoff.Continue(b) {
 		lib.logf(ctx, "[events] starting over on listing topics")
 		for _, i := range rand.Perm(len(lib.brokers)) {
 			broker := lib.brokers[i]
 			lib.logf(ctx, "[events] connecting to %s to list topics", broker)
-			conn, err := dialer.DialContext(listingCtx, "tcp", broker)
+			conn, err := dialer.DialContext(ctx, "tcp", broker)
 			if err != nil {
 				lib.logf(ctx, "[events] could not connect to broker %s, was going to list topics: %v", broker, err)
 				continue
 			}
-			defer func() {
-				_ = conn.Close()
-			}()
 			partitions, err := conn.ReadPartitions()
+			_ = conn.Close()
 			if err != nil {
 				lib.logf(ctx, "[events] could not list partitions on broker %s: %v", broker, err)
 				continue
@@ -290,19 +286,24 @@ func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) {
 				lib.topicsWork.SetDone(unprefixedTopic)
 			}
 			lib.logf(ctx, "[events] done listing existing topics")
-			return
+			return nil
 		}
 		lib.logf(ctx, "[events] waiting before making another attempt to list topics")
 	}
+	if err := ctx.Err(); err != nil {
+		return errors.Errorf("event library could not list kafka topics from any broker: %w", err)
+	}
+	return errors.Errorf("event library could not list kafka topics from any broker")
 }
 
 func (lib *LibraryNoDB) waitForTopicsListing(ctx context.Context) error {
 	lib.topicListingStarted.Do(func() {
-		lib.listAvailableTopics(ctx)
+		lib.topicsListingErr = lib.listAvailableTopics(ctx)
+		close(lib.topicsHaveBeenListed)
 	})
 	select {
 	case <-lib.topicsHaveBeenListed:
-		return nil
+		return lib.topicsListingErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}
