@@ -298,7 +298,9 @@ func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) error {
 
 func (lib *LibraryNoDB) waitForTopicsListing(ctx context.Context) error {
 	lib.topicListingStarted.Do(func() {
-		threadCtx, threadDone := lib.threadContext(ctx, map[string]string{
+		// The listing thread is library-owned. Individual callers may stop waiting
+		// via ctx, but must not cancel the one shared listing attempt.
+		threadCtx, threadDone := lib.threadContext(context.Background(), map[string]string{
 			"action": "thread",
 			"thread": "list available topics",
 		})

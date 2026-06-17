@@ -116,8 +116,8 @@ func newTestTopicListingBackoffPolicy(controllers ...backoff.Controller) testTop
 	}
 }
 
-func (p testTopicListingBackoffPolicy) Start(context.Context) backoff.Controller {
-	return <-p.controllers
+func (p testTopicListingBackoffPolicy) Start(ctx context.Context) backoff.Controller {
+	return newTestTopicListingBackoffControllerWithContext(ctx, <-p.controllers)
 }
 
 type testTopicListingBackoffController struct {
@@ -131,6 +131,34 @@ func (c *testTopicListingBackoffController) Done() <-chan struct{} {
 
 func (c *testTopicListingBackoffController) Next() <-chan struct{} {
 	return c.next
+}
+
+type testTopicListingBackoffControllerWithContext struct {
+	controller backoff.Controller
+	done       chan struct{}
+}
+
+func newTestTopicListingBackoffControllerWithContext(ctx context.Context, controller backoff.Controller) testTopicListingBackoffControllerWithContext {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-ctx.Done():
+		case <-controller.Done():
+		}
+	}()
+	return testTopicListingBackoffControllerWithContext{
+		controller: controller,
+		done:       done,
+	}
+}
+
+func (c testTopicListingBackoffControllerWithContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c testTopicListingBackoffControllerWithContext) Next() <-chan struct{} {
+	return c.controller.Next()
 }
 
 func requireTopicListingLog(t *testing.T, logs <-chan string, contains string) string {
