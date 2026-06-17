@@ -60,20 +60,15 @@ func TestTopicListingRetryWaitsForBackoffBeforeTryingAgain(t *testing.T) {
 	}
 }
 
-func TestTopicListingCanRetryAfterFailedAttempt(t *testing.T) {
+func TestTopicListingContinuesAfterCallerCancel(t *testing.T) {
 	firstController := &testTopicListingBackoffController{
 		done: make(chan struct{}),
 		next: make(chan struct{}, 1),
 	}
 	firstController.next <- struct{}{}
-	secondController := &testTopicListingBackoffController{
-		done: make(chan struct{}),
-		next: make(chan struct{}, 1),
-	}
-	secondController.next <- struct{}{}
 
 	origBackoffPolicy := topicListingBackoffPolicy
-	topicListingBackoffPolicy = newTestTopicListingBackoffPolicy(firstController, secondController)
+	topicListingBackoffPolicy = newTestTopicListingBackoffPolicy(firstController)
 	defer func() {
 		topicListingBackoffPolicy = origBackoffPolicy
 	}()
@@ -87,27 +82,24 @@ func TestTopicListingCanRetryAfterFailedAttempt(t *testing.T) {
 	}
 	lib.Configure(nil, tracer, false, nil, nil, []string{"$$$invalid hostname$$$:1"})
 
+	ctx, cancel := context.WithCancel(context.Background())
 	firstErr := make(chan error, 1)
 	go func() {
-		firstErr <- lib.waitForTopicsListing(context.Background())
+		firstErr <- lib.waitForTopicsListing(ctx)
 	}()
 	requireTopicListingLog(t, logs, "waiting before making another attempt to list topics")
-	close(firstController.done)
+	cancel()
 	requireTopicListingError(t, firstErr)
 
 	select {
 	case <-lib.topicsHaveBeenListed:
-		t.Fatal("topics should not be marked listed after a failed listing attempt")
+		t.Fatal("topics should not be marked listed when listing is still running")
 	default:
 	}
 
-	secondErr := make(chan error, 1)
-	go func() {
-		secondErr <- lib.waitForTopicsListing(context.Background())
-	}()
+	firstController.next <- struct{}{}
 	requireTopicListingLog(t, logs, "starting over on listing topics")
-	close(secondController.done)
-	requireTopicListingError(t, secondErr)
+	close(firstController.done)
 }
 
 type testTopicListingBackoffPolicy struct {
