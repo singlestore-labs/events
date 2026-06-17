@@ -297,15 +297,48 @@ func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) error {
 }
 
 func (lib *LibraryNoDB) waitForTopicsListing(ctx context.Context) error {
-	lib.topicListingStarted.Do(func() {
-		lib.topicsListingErr = lib.listAvailableTopics(ctx)
-		close(lib.topicsHaveBeenListed)
-	})
-	select {
-	case <-lib.topicsHaveBeenListed:
-		return lib.topicsListingErr
-	case <-ctx.Done():
-		return ctx.Err()
+	for {
+		select {
+		case <-lib.topicsHaveBeenListed:
+			return nil
+		default:
+		}
+
+		lib.topicListingLock.Lock()
+		select {
+		case <-lib.topicsHaveBeenListed:
+			lib.topicListingLock.Unlock()
+			return nil
+		default:
+		}
+		if lib.topicListingAttemptDone == nil {
+			done := make(chan struct{})
+			lib.topicListingAttemptDone = done
+			lib.topicListingLock.Unlock()
+
+			err := lib.listAvailableTopics(ctx)
+
+			lib.topicListingLock.Lock()
+			if err == nil {
+				close(lib.topicsHaveBeenListed)
+			}
+			if lib.topicListingAttemptDone == done {
+				lib.topicListingAttemptDone = nil
+			}
+			close(done)
+			lib.topicListingLock.Unlock()
+			return err
+		}
+		done := lib.topicListingAttemptDone
+		lib.topicListingLock.Unlock()
+
+		select {
+		case <-lib.topicsHaveBeenListed:
+			return nil
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 }
 

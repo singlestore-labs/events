@@ -20,7 +20,7 @@ func TestTopicListingRetryWaitsForBackoffBeforeTryingAgain(t *testing.T) {
 	controller.next <- struct{}{}
 
 	origBackoffPolicy := topicListingBackoffPolicy
-	topicListingBackoffPolicy = testTopicListingBackoffPolicy{controller: controller}
+	topicListingBackoffPolicy = newTestTopicListingBackoffPolicy(controller)
 	defer func() {
 		topicListingBackoffPolicy = origBackoffPolicy
 	}()
@@ -60,12 +60,72 @@ func TestTopicListingRetryWaitsForBackoffBeforeTryingAgain(t *testing.T) {
 	}
 }
 
+func TestTopicListingCanRetryAfterFailedAttempt(t *testing.T) {
+	firstController := &testTopicListingBackoffController{
+		done: make(chan struct{}),
+		next: make(chan struct{}, 1),
+	}
+	firstController.next <- struct{}{}
+	secondController := &testTopicListingBackoffController{
+		done: make(chan struct{}),
+		next: make(chan struct{}, 1),
+	}
+	secondController.next <- struct{}{}
+
+	origBackoffPolicy := topicListingBackoffPolicy
+	topicListingBackoffPolicy = newTestTopicListingBackoffPolicy(firstController, secondController)
+	defer func() {
+		topicListingBackoffPolicy = origBackoffPolicy
+	}()
+
+	lib := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
+	logs := make(chan string, 40)
+	tracer := func(context.Context) eventmodels.Tracer {
+		return func(format string, a ...any) {
+			logs <- fmt.Sprintf(format, a...)
+		}
+	}
+	lib.Configure(nil, tracer, false, nil, nil, []string{"$$$invalid hostname$$$:1"})
+
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- lib.waitForTopicsListing(context.Background())
+	}()
+	requireTopicListingLog(t, logs, "waiting before making another attempt to list topics")
+	close(firstController.done)
+	requireTopicListingError(t, firstErr)
+
+	select {
+	case <-lib.topicsHaveBeenListed:
+		t.Fatal("topics should not be marked listed after a failed listing attempt")
+	default:
+	}
+
+	secondErr := make(chan error, 1)
+	go func() {
+		secondErr <- lib.waitForTopicsListing(context.Background())
+	}()
+	requireTopicListingLog(t, logs, "starting over on listing topics")
+	close(secondController.done)
+	requireTopicListingError(t, secondErr)
+}
+
 type testTopicListingBackoffPolicy struct {
-	controller backoff.Controller
+	controllers chan backoff.Controller
+}
+
+func newTestTopicListingBackoffPolicy(controllers ...backoff.Controller) testTopicListingBackoffPolicy {
+	ch := make(chan backoff.Controller, len(controllers))
+	for _, controller := range controllers {
+		ch <- controller
+	}
+	return testTopicListingBackoffPolicy{
+		controllers: ch,
+	}
 }
 
 func (p testTopicListingBackoffPolicy) Start(context.Context) backoff.Controller {
-	return p.controller
+	return <-p.controllers
 }
 
 type testTopicListingBackoffController struct {
@@ -94,5 +154,17 @@ func requireTopicListingLog(t *testing.T, logs <-chan string, contains string) s
 			t.Fatalf("timed out waiting for log containing %q", contains)
 			return ""
 		}
+	}
+}
+
+func requireTopicListingError(t *testing.T, errCh <-chan error) {
+	t.Helper()
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected topic listing error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for topic listing error")
 	}
 }

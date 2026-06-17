@@ -120,9 +120,9 @@ type LibraryNoDB struct {
 	ready                     atomic.Int32
 	topicConfig               map[string]kafka.TopicConfig  // un-prefixed
 	topicsWork                pwork.Work[string, topicsWhy] // un-prefixed in APIs
-	topicListingStarted       sync.Once
+	topicListingLock          sync.Mutex
+	topicListingAttemptDone   chan struct{}
 	topicsHaveBeenListed      chan struct{}
-	topicsListingErr          error
 	mustRegisterTopics        bool
 	hasTxConsumers            bool
 	clientID                  string
