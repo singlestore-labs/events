@@ -13,6 +13,7 @@ import (
 	"github.com/memsql/errors"
 	"github.com/muir/gwrap"
 	"github.com/segmentio/kafka-go"
+	"github.com/singlestore-labs/codegate"
 	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/singlestore-labs/generic"
 	"github.com/singlestore-labs/once"
@@ -31,17 +32,27 @@ type eventLimiterType struct{}
 
 type limit = simultaneous.Limit[eventLimiterType]
 
-var backoffPolicy = backoff.Exponential(
+// TODO: remove this code gate once infinite retries are stable for existing backoff loops.
+var gateEventsExistingBackoffInfiniteRetries = codegate.New("EventsExistingBackoffInfiniteRetries")
+
+var backoffPolicy = backoff.Exponential(existingBackoffOptions(gateEventsExistingBackoffInfiniteRetries,
 	backoff.WithMinInterval(time.Second),
 	backoff.WithMaxInterval(time.Second*30),
 	backoff.WithJitterFactor(0.05),
-)
+)...)
 
-var deadLetterBackoffPolicy = backoff.Exponential(
+var deadLetterBackoffPolicy = backoff.Exponential(existingBackoffOptions(gateEventsExistingBackoffInfiniteRetries,
 	backoff.WithMinInterval(time.Second),
 	backoff.WithMaxInterval(time.Minute*30),
 	backoff.WithJitterFactor(0.05),
-)
+)...)
+
+func existingBackoffOptions(gate codegate.Gate, opts ...backoff.ExponentialOption) []backoff.ExponentialOption {
+	if gate.Enabled() {
+		opts = append(opts, backoff.WithMaxRetries(0))
+	}
+	return opts
+}
 
 // StartConsumingOrPanic is a wapper around StartConsuming that returns only after the consumers
 // have started. If StartConsuming returns error, it panics.

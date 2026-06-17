@@ -28,11 +28,11 @@ const (
 	debugLimits = false
 )
 
-var highLimitBackoffPolicy = backoff.Exponential(
+var highLimitBackoffPolicy = backoff.Exponential(existingBackoffOptions(gateEventsExistingBackoffInfiniteRetries,
 	backoff.WithMinInterval(time.Second*4),
 	backoff.WithMaxInterval(time.Second*1800),
 	backoff.WithJitterFactor(0.05),
-)
+)...)
 
 // prepareToProduce makes sure that all topics are created and if
 // there are any messages that are >1MB, it makes sure that the message size
