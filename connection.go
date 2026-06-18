@@ -122,7 +122,7 @@ type LibraryNoDB struct {
 	topicsWork                pwork.Work[string, topicsWhy] // un-prefixed in APIs
 	topicListingStarted       sync.Once
 	topicsHaveBeenListed      chan struct{}
-	topicsListingErr          error
+	topicsListingErr          error // only valid after topicsHaveBeenListed is closed
 	mustRegisterTopics        bool
 	hasTxConsumers            bool
 	clientID                  string
