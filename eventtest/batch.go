@@ -21,10 +21,11 @@ import (
 )
 
 const (
-	smallBatchSleep  = time.Millisecond * 600
-	eventsToSend     = 200
-	maxWait          = 30 * time.Second
-	broadcastMaxWait = 75 * time.Second
+	smallBatchSleep        = time.Millisecond * 600
+	eventsToSend           = 200
+	maxWait                = 30 * time.Second
+	broadcastMaxWait       = 75 * time.Second
+	broadcastTestHeartbeat = broadcastMaxWait * 2
 )
 
 type batchDeliveryInfo struct {
@@ -206,6 +207,9 @@ func BatchDeliveryBroadcastTest[
 	t, lib, topic, _, events := batchTestCommon(ctx, t, conn, brokers, "BDB", prefix)
 
 	info, handler := createHandler[ID, TX, DB](t, "broadcast")
+	// Avoid masking the broadcast reader idle timeout with heartbeat traffic while
+	// this test is waiting for application-topic delivery.
+	lib.ConfigureBroadcastHeartbeat(broadcastTestHeartbeat)
 	lib.ConsumeBroadcast(Name(t)+"CB", topic.BatchHandler(handler))
 
 	runTest(ctx, t, lib, events, cancel, info, broadcastMaxWait)
