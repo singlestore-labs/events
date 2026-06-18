@@ -267,6 +267,7 @@ func (lib *Library[ID, TX, DB]) CatchUpProduce(ctx context.Context, sleepTime ti
 		lib.lock.Lock()
 		defer lib.lock.Unlock()
 		lib.produceCtx = ctx
+		lib.notifyContextUpdateLocked()
 	}()
 	if !lib.HasDB() {
 		close(done)

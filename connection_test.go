@@ -1,9 +1,11 @@
 package events
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -12,4 +14,23 @@ func TestConstants(t *testing.T) {
 	assert.Greater(t, broadcastReaderIdleTimeout, time.Second)
 	assert.Less(t, broadcastHeartbeatRandom, 0.8)
 	assert.Less(t, maxConsumerGroupNameLength, 56)
+}
+
+func TestThreadContextAdoptsLateLifecycleContext(t *testing.T) {
+	lib := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
+	ctx1, done1 := lib.threadContext(context.Background(), map[string]string{"thread": "test 1"})
+	defer done1()
+	ctx2, done2 := lib.threadContext(context.Background(), map[string]string{"thread": "test 2"})
+	defer done2()
+
+	consumeCtx, cancelConsume := context.WithCancel(context.Background())
+	lib.lock.Lock()
+	lib.consumeCtx = consumeCtx
+	lib.notifyContextUpdateLocked()
+	lib.lock.Unlock()
+
+	cancelConsume()
+	assert.Eventually(t, func() bool {
+		return ctx1.Err() != nil && ctx2.Err() != nil
+	}, time.Second, time.Millisecond*10)
 }

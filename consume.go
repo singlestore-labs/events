@@ -128,6 +128,7 @@ func (lib *Library[ID, TX, DB]) startConsuming(baseCtx context.Context, waitForS
 		lib.lock.Lock()
 		defer lib.lock.Unlock()
 		lib.consumeCtx = baseCtx
+		lib.notifyContextUpdateLocked()
 	}()
 	for _, group := range lib.readers {
 		for topic := range group.topics {

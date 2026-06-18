@@ -144,6 +144,7 @@ type LibraryNoDB struct {
 	prefix                    string // prefixes all topics and consumer groups
 	consumeCtx                context.Context
 	produceCtx                context.Context
+	contextUpdate             chan struct{}
 	libraryDone               sync.WaitGroup
 
 	// lock must be held when....
@@ -259,6 +260,7 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 			doEnhance:                true,
 			instanceID:               instanceCount.Add(1),
 			topicsHaveBeenListed:     make(chan struct{}),
+			contextUpdate:            make(chan struct{}),
 			sizeCapBrokerReady:       make(chan struct{}),
 			sizeCapDefaultAssumed:    1_000_000,
 			tracerProvider:           func(context.Context) eventmodels.Tracer { return log.Printf },
@@ -949,45 +951,72 @@ func (lib *LibraryNoDB) logf(ctx context.Context, format string, a ...any) {
 }
 
 // threadContext cancels the returned context at the earlier of:
-// - when the returned done() func is called
-// - when both consume and catch-up-produce are cancelled
-// The returned context has a span. It is cancelled when the
-// returned done is called.
-// The provided context is only used if there is no consume and
-// no catch-up-produce invocation.
+//   - when the returned done() func is called
+//   - when all registered consume and catch-up-produce contexts are cancelled
+//   - when the provided backup context is cancelled before any library lifecycle
+//     contexts are registered
+//
+// The returned context has a span. It is cancelled when the returned done is called.
 func (lib *LibraryNoDB) threadContext(backupCtx context.Context, spanMap map[string]string) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, spanMap)
-	waitFor := make([]context.Context, 0, 2)
+	lib.libraryDone.Add(1)
+	go func() {
+		defer lib.libraryDone.Done()
+		defer cancel()
+	Outer:
+		for {
+			waitFor, update := lib.contextsToWaitFor()
+			if len(waitFor) == 0 {
+				select {
+				case <-ctx.Done():
+					// done function used
+					return
+				case <-backupCtx.Done():
+					return
+				case <-update:
+					continue
+				}
+			}
+			for len(waitFor) > 0 {
+				select {
+				case <-ctx.Done():
+					// done function used
+					return
+				case <-update:
+					// A consume or catch-up-produce context was registered while
+					// this thread was already waiting. Re-snapshot so this thread
+					// follows the latest library lifecycle.
+					continue Outer
+				case <-waitFor[0].Done():
+					waitFor = waitFor[1:]
+				}
+			}
+			return
+		}
+	}()
+	// We don't call spanDone in the goroutine. Wait for the returned done
+	// function so the caller controls the span lifetime.
+	return ctx, func() {
+		cancel()
+		spanDone()
+	}
+}
+
+func (lib *LibraryNoDB) contextsToWaitFor() ([]context.Context, <-chan struct{}) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
+	waitFor := make([]context.Context, 0, 2)
 	if lib.consumeCtx != nil {
 		waitFor = append(waitFor, lib.consumeCtx)
 	}
 	if lib.produceCtx != nil {
 		waitFor = append(waitFor, lib.produceCtx)
 	}
-	if len(waitFor) == 0 {
-		waitFor = append(waitFor, backupCtx)
-	}
-	lib.libraryDone.Add(1)
-	go func() {
-		defer lib.libraryDone.Done()
-		defer cancel()
-		for len(waitFor) > 0 {
-			select {
-			case <-ctx.Done():
-				// done function used
-				return
-			case <-waitFor[0].Done():
-				waitFor = waitFor[1:]
-			}
-		}
-		// we don't call spanDone yet -- we wait for the cancel to
-		// cause the done function to be called
-	}()
-	return ctx, func() {
-		cancel()
-		spanDone()
-	}
+	return waitFor, lib.contextUpdate
+}
+
+func (lib *LibraryNoDB) notifyContextUpdateLocked() {
+	close(lib.contextUpdate)
+	lib.contextUpdate = make(chan struct{})
 }
