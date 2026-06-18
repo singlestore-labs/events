@@ -306,16 +306,20 @@ func (lib *LibraryNoDB) waitForTopicsListing(ctx context.Context) error {
 		})
 		go func() {
 			defer threadDone()
-			if err := lib.listAvailableTopics(threadCtx); err == nil {
-				close(lib.topicsHaveBeenListed)
-			}
+			lib.topicsListingErr = lib.listAvailableTopics(threadCtx)
+			close(lib.topicsHaveBeenListed)
 		}()
 	})
 	select {
 	case <-lib.topicsHaveBeenListed:
-		return nil
+		return lib.topicsListingErr
 	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case <-lib.topicsHaveBeenListed:
+			return lib.topicsListingErr
+		default:
+			return ctx.Err()
+		}
 	}
 }
 

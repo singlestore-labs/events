@@ -32,7 +32,7 @@ func TestTopicListingRetryWaitsForBackoffBeforeTryingAgain(t *testing.T) {
 			logs <- fmt.Sprintf(format, a...)
 		}
 	}
-	lib.Configure(nil, tracer, false, nil, nil, []string{"$$$invalid hostname$$$:1"})
+	lib.Configure(nil, tracer, false, nil, nil, nil)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -80,7 +80,7 @@ func TestTopicListingContinuesAfterCallerCancel(t *testing.T) {
 			logs <- fmt.Sprintf(format, a...)
 		}
 	}
-	lib.Configure(nil, tracer, false, nil, nil, []string{"$$$invalid hostname$$$:1"})
+	lib.Configure(nil, tracer, false, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	firstErr := make(chan error, 1)
