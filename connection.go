@@ -967,10 +967,10 @@ var gateEventsThreadContextLifecycle = codegate.New("EventsThreadContextLifecycl
 //
 // The returned context has a span. It is cancelled when the returned done is called.
 func (lib *LibraryNoDB) threadContext(backupCtx context.Context, spanMap map[string]string) (context.Context, func()) {
-	if gateEventsThreadContextLifecycle.Enabled() {
-		return lib.threadContextDynamic(spanMap)
+	if !gateEventsThreadContextLifecycle.Enabled() {
+		return lib.threadContextSnapshot(backupCtx, spanMap)
 	}
-	return lib.threadContextSnapshot(backupCtx, spanMap)
+	return lib.threadContextDynamic(spanMap)
 }
 
 func (lib *LibraryNoDB) threadContextDynamic(spanMap map[string]string) (context.Context, func()) {
