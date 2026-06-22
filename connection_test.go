@@ -34,3 +34,18 @@ func TestThreadContextAdoptsLateLifecycleContext(t *testing.T) {
 		return ctx1.Err() != nil && ctx2.Err() != nil
 	}, time.Second, time.Millisecond*10)
 }
+
+func TestThreadContextWithoutLifecycleLastsUntilShutdown(t *testing.T) {
+	lib := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
+	backupCtx, cancelBackup := context.WithCancel(context.Background())
+	ctx, done := lib.threadContext(backupCtx, map[string]string{"thread": "test"})
+	defer done()
+
+	cancelBackup()
+	assert.Never(t, func() bool {
+		return ctx.Err() != nil
+	}, time.Millisecond*50, time.Millisecond*10)
+
+	lib.Shutdown(context.Background())
+	assert.ErrorIs(t, ctx.Err(), context.Canceled)
+}

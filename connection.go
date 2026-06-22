@@ -145,6 +145,8 @@ type LibraryNoDB struct {
 	consumeCtx                context.Context
 	produceCtx                context.Context
 	contextUpdate             chan struct{}
+	shutdownCtx               context.Context
+	shutdownCancel            context.CancelFunc
 	libraryDone               sync.WaitGroup
 
 	// lock must be held when....
@@ -243,6 +245,7 @@ type canHandle interface {
 // Configure() and Consume*() may not be used once consumption or production
 // has started.
 func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodels.AbstractDB[ID, TX]]() *Library[ID, TX, DB] {
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	lib := Library[ID, TX, DB]{
 		produceFromTable: make(chan []ID, produceFromTableBuffer),
 		LibraryNoDB: LibraryNoDB{
@@ -261,6 +264,8 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 			instanceID:               instanceCount.Add(1),
 			topicsHaveBeenListed:     make(chan struct{}),
 			contextUpdate:            make(chan struct{}),
+			shutdownCtx:              shutdownCtx,
+			shutdownCancel:           shutdownCancel,
 			sizeCapBrokerReady:       make(chan struct{}),
 			sizeCapDefaultAssumed:    1_000_000,
 			tracerProvider:           func(context.Context) eventmodels.Tracer { return log.Printf },
@@ -452,10 +457,8 @@ func (lib *Library[ID, TX, DB]) start(ctx context.Context, str string, args ...a
 }
 
 // Shutdown returns when the library is completely shut down.
-// If consumers were never started and a catch up producer was
-// never started, then produce may return before background threads
-// created by produce have completed. Shutdown does not cancel
-// the consume or catch-up-producer contects.
+// Shutdown cancels library-owned background threads. It does not cancel
+// the consume or catch-up-producer contexts.
 func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
 	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, map[string]string{
 		"action": "wait for shutdown",
@@ -463,28 +466,25 @@ func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
 	defer spanDone()
 	consumeNotCancelled := false
 	produceNotCancelled := false
-	if func() bool {
+	func() {
 		defer lib.lock.Unlock()
 		lib.lock.Lock()
 		lib.ready.Store(isShutdown)
+		lib.shutdownCancel()
 		if lib.consumeCtx != nil && lib.consumeCtx.Err() == nil {
 			consumeNotCancelled = true
 		}
 		if lib.produceCtx != nil && lib.produceCtx.Err() == nil {
 			produceNotCancelled = true
 		}
-		return lib.consumeCtx != nil || lib.produceCtx != nil
-	}() {
-		if consumeNotCancelled {
-			lib.tracerProvider(ctx)("[events] Shutdown called when the consume context has not been cancelled")
-		}
-		if produceNotCancelled {
-			lib.tracerProvider(ctx)("[events] Shutdown called when the catch up producer context has not been cancelled")
-		}
-		// only wait if consumers or catch-up-producer
-		// was started
-		lib.libraryDone.Wait()
+	}()
+	if consumeNotCancelled {
+		lib.tracerProvider(ctx)("[events] Shutdown called when the consume context has not been cancelled")
 	}
+	if produceNotCancelled {
+		lib.tracerProvider(ctx)("[events] Shutdown called when the catch up producer context has not been cancelled")
+	}
+	lib.libraryDone.Wait()
 }
 
 func (lib *Library[ID, TX, DB]) ConfigureBroadcastHeartbeat(dur time.Duration) {
@@ -953,11 +953,10 @@ func (lib *LibraryNoDB) logf(ctx context.Context, format string, a ...any) {
 // threadContext cancels the returned context at the earlier of:
 //   - when the returned done() func is called
 //   - when all registered consume and catch-up-produce contexts are cancelled
-//   - when the provided backup context is cancelled before any library lifecycle
-//     contexts are registered
+//   - when Shutdown is called before any library lifecycle contexts are registered
 //
 // The returned context has a span. It is cancelled when the returned done is called.
-func (lib *LibraryNoDB) threadContext(backupCtx context.Context, spanMap map[string]string) (context.Context, func()) {
+func (lib *LibraryNoDB) threadContext(_ context.Context, spanMap map[string]string) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, spanMap)
 	lib.libraryDone.Add(1)
@@ -972,7 +971,7 @@ func (lib *LibraryNoDB) threadContext(backupCtx context.Context, spanMap map[str
 				case <-ctx.Done():
 					// done function used
 					return
-				case <-backupCtx.Done():
+				case <-lib.shutdownCtx.Done():
 					return
 				case <-update:
 					continue
