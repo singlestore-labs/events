@@ -962,7 +962,7 @@ func (lib *LibraryNoDB) logf(ctx context.Context, format string, a ...any) {
 func (lib *LibraryNoDB) threadContext(spanMap map[string]string) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, spanMap)
-	lib.libraryDone.Add(1)
+	lib.libraryDone.Add(2)
 	go func() {
 		defer lib.libraryDone.Done()
 		defer cancel()
@@ -1000,8 +1000,9 @@ func (lib *LibraryNoDB) threadContext(spanMap map[string]string) (context.Contex
 	// We don't call spanDone in the goroutine. Wait for the returned done
 	// function so the caller controls the span lifetime.
 	return ctx, func() {
+		defer lib.libraryDone.Done()
+		defer spanDone()
 		cancel()
-		spanDone()
 	}
 }
 

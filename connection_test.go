@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -38,12 +39,30 @@ func TestThreadContextAdoptsLateLifecycleContext(t *testing.T) {
 func TestThreadContextWithoutLifecycleLastsUntilShutdown(t *testing.T) {
 	lib := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
 	ctx, done := lib.threadContext(map[string]string{"thread": "test"})
-	defer done()
 
 	assert.Never(t, func() bool {
 		return ctx.Err() != nil
 	}, time.Millisecond*50, time.Millisecond*10)
 
-	lib.Shutdown(context.Background())
-	assert.ErrorIs(t, ctx.Err(), context.Canceled)
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		lib.Shutdown(context.Background())
+	}()
+	assert.Eventually(t, func() bool {
+		return errors.Is(ctx.Err(), context.Canceled)
+	}, time.Second, time.Millisecond*10)
+
+	select {
+	case <-shutdownDone:
+		t.Fatal("Shutdown returned before thread context callback was called")
+	default:
+	}
+
+	done()
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Shutdown after thread context callback")
+	}
 }
