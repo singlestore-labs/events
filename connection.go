@@ -461,7 +461,7 @@ func (lib *Library[ID, TX, DB]) start(ctx context.Context, str string, args ...a
 // If StartConsuming or CatchUpProduce have been called, cancel their contexts
 // before calling Shutdown. Shutdown does not cancel those contexts.
 //
-// If StartConsuming and CatchUpProduce were never called, Shutdown should still
+// If StartConsuming and CatchUpProduce were never called, Shutdown should
 // be called to terminate library-owned background threads.
 func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
 	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, map[string]string{
