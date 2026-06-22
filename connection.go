@@ -473,7 +473,10 @@ func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
 		defer lib.lock.Unlock()
 		lib.lock.Lock()
 		lib.ready.Store(isShutdown)
-		lib.shutdownCancel()
+		if lib.shutdownCancel != nil {
+			lib.shutdownCancel()
+			lib.shutdownCancel = nil
+		}
 		if lib.consumeCtx != nil && lib.consumeCtx.Err() == nil {
 			consumeNotCancelled = true
 		}
@@ -1019,6 +1022,8 @@ func (lib *LibraryNoDB) contextsToWaitFor() ([]context.Context, <-chan struct{})
 	return waitFor, lib.contextUpdate
 }
 
+// notifyContextUpdateLocked broadcasts that consumeCtx or produceCtx was
+// registered or replaced. lib.lock must be held by the caller.
 func (lib *LibraryNoDB) notifyContextUpdateLocked() {
 	close(lib.contextUpdate)
 	lib.contextUpdate = make(chan struct{})
