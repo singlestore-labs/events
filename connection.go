@@ -966,6 +966,7 @@ var gateEventsThreadContextLifecycle = codegate.New("EventsThreadContextLifecycl
 //   - when Shutdown is called before any library lifecycle contexts are registered
 //
 // The returned context has a span. It is cancelled when the returned done is called.
+// TODO: remove backupCtx when removing gateEventsThreadContextLifecycle.
 func (lib *LibraryNoDB) threadContext(backupCtx context.Context, spanMap map[string]string) (context.Context, func()) {
 	if !gateEventsThreadContextLifecycle.Enabled() {
 		return lib.threadContextOld(backupCtx, spanMap)
