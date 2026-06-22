@@ -19,6 +19,7 @@ import (
 	"github.com/muir/gwrap"
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl"
+	"github.com/singlestore-labs/codegate"
 	"github.com/singlestore-labs/generic"
 	"github.com/singlestore-labs/simultaneous"
 
@@ -86,6 +87,9 @@ var (
 	LegalTopicNames         = regexp.MustCompile(fmt.Sprintf(`^[-._a-zA-Z0-9]{1,%d}$`, maxTopicNameLength))
 	legalConsumerGroupNames = regexp.MustCompile(fmt.Sprintf(`^[-._a-zA-Z0-9]{1,%d}$`, maxConsumerGroupNameLength))
 )
+
+// TODO: remove this code gate once dynamic threadContext lifecycle handling is stable in production.
+var gateEventsThreadContextLifecycle = codegate.New("EventsThreadContextLifecycle")
 
 var instanceCount atomic.Int32
 
@@ -962,7 +966,14 @@ func (lib *LibraryNoDB) logf(ctx context.Context, format string, a ...any) {
 //   - when Shutdown is called before any library lifecycle contexts are registered
 //
 // The returned context has a span. It is cancelled when the returned done is called.
-func (lib *LibraryNoDB) threadContext(spanMap map[string]string) (context.Context, func()) {
+func (lib *LibraryNoDB) threadContext(backupCtx context.Context, spanMap map[string]string) (context.Context, func()) {
+	if !gateEventsThreadContextLifecycle.Enabled() {
+		return lib.threadContextSnapshot(backupCtx, spanMap)
+	}
+	return lib.threadContextDynamic(spanMap)
+}
+
+func (lib *LibraryNoDB) threadContextDynamic(spanMap map[string]string) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, spanMap)
 	lib.libraryDone.Add(2)
@@ -1002,6 +1013,41 @@ func (lib *LibraryNoDB) threadContext(spanMap map[string]string) (context.Contex
 	}()
 	// We don't call spanDone in the goroutine. Wait for the returned done
 	// function so the caller controls the span lifetime.
+	return ctx, func() {
+		defer lib.libraryDone.Done()
+		defer spanDone()
+		cancel()
+	}
+}
+
+func (lib *LibraryNoDB) threadContextSnapshot(backupCtx context.Context, spanMap map[string]string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, spanMap)
+	waitFor := make([]context.Context, 0, 2)
+	lib.lock.Lock()
+	if lib.consumeCtx != nil {
+		waitFor = append(waitFor, lib.consumeCtx)
+	}
+	if lib.produceCtx != nil {
+		waitFor = append(waitFor, lib.produceCtx)
+	}
+	lib.lock.Unlock()
+	if len(waitFor) == 0 {
+		waitFor = append(waitFor, backupCtx)
+	}
+	lib.libraryDone.Add(2)
+	go func() {
+		defer lib.libraryDone.Done()
+		defer cancel()
+		for len(waitFor) > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-waitFor[0].Done():
+				waitFor = waitFor[1:]
+			}
+		}
+	}()
 	return ctx, func() {
 		defer lib.libraryDone.Done()
 		defer spanDone()

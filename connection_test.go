@@ -19,9 +19,9 @@ func TestConstants(t *testing.T) {
 
 func TestThreadContextAdoptsLateLifecycleContext(t *testing.T) {
 	lib := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
-	ctx1, done1 := lib.threadContext(map[string]string{"thread": "test 1"})
+	ctx1, done1 := lib.threadContext(context.Background(), map[string]string{"thread": "test 1"})
 	defer done1()
-	ctx2, done2 := lib.threadContext(map[string]string{"thread": "test 2"})
+	ctx2, done2 := lib.threadContext(context.Background(), map[string]string{"thread": "test 2"})
 	defer done2()
 
 	consumeCtx, cancelConsume := context.WithCancel(context.Background())
@@ -38,7 +38,7 @@ func TestThreadContextAdoptsLateLifecycleContext(t *testing.T) {
 
 func TestThreadContextWithoutLifecycleLastsUntilShutdown(t *testing.T) {
 	lib := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
-	ctx, done := lib.threadContext(map[string]string{"thread": "test"})
+	ctx, done := lib.threadContext(context.Background(), map[string]string{"thread": "test"})
 
 	assert.Never(t, func() bool {
 		return ctx.Err() != nil
@@ -69,7 +69,7 @@ func TestThreadContextWithoutLifecycleLastsUntilShutdown(t *testing.T) {
 
 func TestShutdownCanBeCalledTwice(t *testing.T) {
 	lib := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
-	ctx, done := lib.threadContext(map[string]string{"thread": "test"})
+	ctx, done := lib.threadContext(context.Background(), map[string]string{"thread": "test"})
 
 	shutdownDone := make(chan struct{})
 	go func() {
