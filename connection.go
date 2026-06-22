@@ -88,9 +88,6 @@ var (
 	legalConsumerGroupNames = regexp.MustCompile(fmt.Sprintf(`^[-._a-zA-Z0-9]{1,%d}$`, maxConsumerGroupNameLength))
 )
 
-// TODO: remove this code gate once dynamic threadContext lifecycle handling is stable in production.
-var gateEventsThreadContextLifecycle = codegate.New("EventsThreadContextLifecycle")
-
 var instanceCount atomic.Int32
 
 type Library[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodels.AbstractDB[ID, TX]] struct {
@@ -960,6 +957,9 @@ func (lib *LibraryNoDB) logf(ctx context.Context, format string, a ...any) {
 	lib.tracerProvider(ctx)(format, a...)
 }
 
+// TODO: remove this code gate once dynamic threadContext lifecycle handling is stable in production.
+var gateEventsThreadContextLifecycle = codegate.New("EventsThreadContextLifecycle")
+
 // threadContext cancels the returned context at the earlier of:
 //   - when the returned done() func is called
 //   - when all registered consume and catch-up-produce contexts are cancelled
@@ -967,10 +967,10 @@ func (lib *LibraryNoDB) logf(ctx context.Context, format string, a ...any) {
 //
 // The returned context has a span. It is cancelled when the returned done is called.
 func (lib *LibraryNoDB) threadContext(backupCtx context.Context, spanMap map[string]string) (context.Context, func()) {
-	if !gateEventsThreadContextLifecycle.Enabled() {
-		return lib.threadContextSnapshot(backupCtx, spanMap)
+	if gateEventsThreadContextLifecycle.Enabled() {
+		return lib.threadContextDynamic(spanMap)
 	}
-	return lib.threadContextDynamic(spanMap)
+	return lib.threadContextSnapshot(backupCtx, spanMap)
 }
 
 func (lib *LibraryNoDB) threadContextDynamic(spanMap map[string]string) (context.Context, func()) {
