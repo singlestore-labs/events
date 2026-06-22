@@ -132,7 +132,7 @@ func (lib *LibraryNoDB) sizeCapStartBrokerCaps(ctx context.Context) {
 }
 
 // sizeCapLoadBrokerCaps performs DescribeConfigs for broker-level size limits
-func (lib *LibraryNoDB) sizeCapLoadBrokerCaps(ctx context.Context) {
+func (lib *LibraryNoDB) sizeCapLoadBrokerCaps(_ context.Context) {
 	defer lib.libraryDone.Done()
 	ctx, threadDone := lib.threadContext(map[string]string{
 		"action": "thread",
