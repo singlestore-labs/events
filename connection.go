@@ -1022,33 +1022,35 @@ func (lib *LibraryNoDB) threadContextOld(backupCtx context.Context, spanMap map[
 	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, spanMap)
 	waitFor := make([]context.Context, 0, 2)
 	lib.lock.Lock()
+	defer lib.lock.Unlock()
 	if lib.consumeCtx != nil {
 		waitFor = append(waitFor, lib.consumeCtx)
 	}
 	if lib.produceCtx != nil {
 		waitFor = append(waitFor, lib.produceCtx)
 	}
-	lib.lock.Unlock()
 	if len(waitFor) == 0 {
 		waitFor = append(waitFor, backupCtx)
 	}
-	lib.libraryDone.Add(2)
+	lib.libraryDone.Add(1)
 	go func() {
 		defer lib.libraryDone.Done()
 		defer cancel()
 		for len(waitFor) > 0 {
 			select {
 			case <-ctx.Done():
+				// done function used
 				return
 			case <-waitFor[0].Done():
 				waitFor = waitFor[1:]
 			}
 		}
+		// we don't call spanDone yet -- we wait for the cancel to
+		// cause the done function to be called
 	}()
 	return ctx, func() {
-		defer lib.libraryDone.Done()
-		defer spanDone()
 		cancel()
+		spanDone()
 	}
 }
 
