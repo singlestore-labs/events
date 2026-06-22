@@ -956,7 +956,7 @@ func (lib *LibraryNoDB) logf(ctx context.Context, format string, a ...any) {
 //   - when Shutdown is called before any library lifecycle contexts are registered
 //
 // The returned context has a span. It is cancelled when the returned done is called.
-func (lib *LibraryNoDB) threadContext(_ context.Context, spanMap map[string]string) (context.Context, func()) {
+func (lib *LibraryNoDB) threadContext(spanMap map[string]string) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, spanMap)
 	lib.libraryDone.Add(1)

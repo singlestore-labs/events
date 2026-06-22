@@ -72,7 +72,7 @@ func (lib *Library[ID, TX, DB]) prepareToProduce(ctx context.Context, messages [
 	if maxPayload <= lib.sizeCapDefaultAssumed {
 		// Fire off background fetch; do not block. Reuse provided context.
 		go func() {
-			threadCtx, threadDone := lib.threadContext(ctx, map[string]string{
+			threadCtx, threadDone := lib.threadContext(map[string]string{
 				"action": "thread",
 				"thread": "pre-fetch topic size caps",
 			})
@@ -134,7 +134,7 @@ func (lib *LibraryNoDB) sizeCapStartBrokerCaps(ctx context.Context) {
 // sizeCapLoadBrokerCaps performs DescribeConfigs for broker-level size limits
 func (lib *LibraryNoDB) sizeCapLoadBrokerCaps(ctx context.Context) {
 	defer lib.libraryDone.Done()
-	ctx, threadDone := lib.threadContext(ctx, map[string]string{
+	ctx, threadDone := lib.threadContext(map[string]string{
 		"action": "thread",
 		"thread": "load broker size caps",
 	})
@@ -260,7 +260,9 @@ func (lib *LibraryNoDB) sizeCapBrokerEffective(ctx context.Context) int64 {
 func (lib *LibraryNoDB) configureSizeCapPrework() {
 	lib.sizeCapWork.MaxSimultaneous = 20
 	lib.sizeCapWork.BackoffPolicy = highLimitBackoffPolicy
-	lib.sizeCapWork.ThreadContext = lib.threadContext
+	lib.sizeCapWork.ThreadContext = func(_ context.Context, spanMap map[string]string) (context.Context, func()) {
+		return lib.threadContext(spanMap)
+	}
 	lib.sizeCapWork.WorkDeadline = topicCreationDeadline
 	lib.sizeCapWork.ItemRetryDelay = 5 * time.Second
 	lib.sizeCapWork.ErrorReporter = func(ctx context.Context, err error, _ string) {

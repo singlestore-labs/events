@@ -110,7 +110,9 @@ func (lib *LibraryNoDB) precreateTopicsForConsuming(ctx context.Context, consume
 func (lib *LibraryNoDB) configureTopicsPrework() {
 	lib.topicsWork.MaxSimultaneous = 20
 	lib.topicsWork.BackoffPolicy = backoffPolicy
-	lib.topicsWork.ThreadContext = lib.threadContext
+	lib.topicsWork.ThreadContext = func(_ context.Context, spanMap map[string]string) (context.Context, func()) {
+		return lib.threadContext(spanMap)
+	}
 	lib.topicsWork.WorkDeadline = topicCreationDeadline
 	lib.topicsWork.ItemRetryDelay = 5 * time.Second
 	lib.topicsWork.ErrorReporter = func(ctx context.Context, err error, why topicsWhy) {
@@ -300,7 +302,7 @@ func (lib *LibraryNoDB) waitForTopicsListing(ctx context.Context) error {
 	lib.topicListingStarted.Do(func() {
 		// The listing thread is library-owned. Individual callers may stop waiting
 		// via ctx, but must not cancel the one shared listing attempt.
-		threadCtx, threadDone := lib.threadContext(context.Background(), map[string]string{
+		threadCtx, threadDone := lib.threadContext(map[string]string{
 			"action": "thread",
 			"thread": "list available topics",
 		})
