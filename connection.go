@@ -970,10 +970,6 @@ func (lib *LibraryNoDB) threadContext(backupCtx context.Context, spanMap map[str
 	if !gateEventsThreadContextLifecycle.Enabled() {
 		return lib.threadContextSnapshot(backupCtx, spanMap)
 	}
-	return lib.threadContextDynamic(spanMap)
-}
-
-func (lib *LibraryNoDB) threadContextDynamic(spanMap map[string]string) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, spanMap)
 	lib.libraryDone.Add(2)
