@@ -457,8 +457,11 @@ func (lib *Library[ID, TX, DB]) start(ctx context.Context, str string, args ...a
 }
 
 // Shutdown returns when the library is completely shut down.
-// Shutdown cancels library-owned background threads. It does not cancel
-// the consume or catch-up-producer contexts.
+// If StartConsuming or CatchUpProduce have been called, cancel their contexts
+// before calling Shutdown. Shutdown does not cancel those contexts.
+//
+// If StartConsuming and CatchUpProduce were never called, Shutdown should still
+// be called to terminate library-owned background threads.
 func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
 	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, map[string]string{
 		"action": "wait for shutdown",
