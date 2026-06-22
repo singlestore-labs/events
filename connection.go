@@ -471,8 +471,8 @@ func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
 	consumeNotCancelled := false
 	produceNotCancelled := false
 	func() {
-		defer lib.lock.Unlock()
 		lib.lock.Lock()
+		defer lib.lock.Unlock()
 		lib.ready.Store(isShutdown)
 		if lib.shutdownCancel != nil {
 			lib.shutdownCancel()
