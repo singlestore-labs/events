@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/lestrrat-go/backoff/v2"
 	"github.com/memsql/errors"
 	"github.com/segmentio/kafka-go"
 
@@ -31,6 +32,13 @@ const (
 	defaultNumPartitions        = 2
 	defaultReplicationFactor    = 3
 	debugLogTopicsMissingPrefix = false
+)
+
+var topicListingBackoffPolicy = backoff.Exponential(
+	backoff.WithMinInterval(time.Second),
+	backoff.WithMaxInterval(time.Second*30),
+	backoff.WithJitterFactor(0.05),
+	backoff.WithMaxRetries(0),
 )
 
 // UnregisteredTopicError is the base error when attempting to create a
@@ -241,23 +249,21 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 	}
 }
 
-func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) {
-	defer close(lib.topicsHaveBeenListed)
+func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) error {
 	dialer := lib.dialer()
-	for {
+	b := topicListingBackoffPolicy.Start(ctx)
+	for backoff.Continue(b) {
 		lib.logf(ctx, "[events] starting over on listing topics")
 		for _, i := range rand.Perm(len(lib.brokers)) {
 			broker := lib.brokers[i]
 			lib.logf(ctx, "[events] connecting to %s to list topics", broker)
-			conn, err := dialer.Dial("tcp", broker)
+			conn, err := dialer.DialContext(ctx, "tcp", broker)
 			if err != nil {
 				lib.logf(ctx, "[events] could not connect to broker %s, was going to list topics: %v", broker, err)
 				continue
 			}
-			defer func() {
-				_ = conn.Close()
-			}()
 			partitions, err := conn.ReadPartitions()
+			_ = conn.Close()
 			if err != nil {
 				lib.logf(ctx, "[events] could not list partitions on broker %s: %v", broker, err)
 				continue
@@ -280,21 +286,40 @@ func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) {
 				lib.topicsWork.SetDone(unprefixedTopic)
 			}
 			lib.logf(ctx, "[events] done listing existing topics")
-			return
+			return nil
 		}
 		lib.logf(ctx, "[events] waiting before making another attempt to list topics")
 	}
+	if err := ctx.Err(); err != nil {
+		return errors.Errorf("event library could not list kafka topics from any broker: %w", err)
+	}
+	return errors.Errorf("event library could not list kafka topics from any broker")
 }
 
 func (lib *LibraryNoDB) waitForTopicsListing(ctx context.Context) error {
 	lib.topicListingStarted.Do(func() {
-		lib.listAvailableTopics(ctx)
+		// The listing thread is library-owned. Individual callers may stop waiting
+		// via ctx, but must not cancel the one shared listing attempt.
+		threadCtx, threadDone := lib.threadContext(lib.shutdownCtx, map[string]string{
+			"action": "thread",
+			"thread": "list available topics",
+		})
+		go func() {
+			defer threadDone()
+			lib.topicsListingErr = lib.listAvailableTopics(threadCtx)
+			close(lib.topicsHaveBeenListed)
+		}()
 	})
 	select {
 	case <-lib.topicsHaveBeenListed:
-		return nil
+		return lib.topicsListingErr
 	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case <-lib.topicsHaveBeenListed:
+			return lib.topicsListingErr
+		default:
+			return ctx.Err()
+		}
 	}
 }
 

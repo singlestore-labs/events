@@ -19,6 +19,7 @@ import (
 	"github.com/muir/gwrap"
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl"
+	"github.com/singlestore-labs/codegate"
 	"github.com/singlestore-labs/generic"
 	"github.com/singlestore-labs/simultaneous"
 
@@ -122,6 +123,7 @@ type LibraryNoDB struct {
 	topicsWork                pwork.Work[string, topicsWhy] // un-prefixed in APIs
 	topicListingStarted       sync.Once
 	topicsHaveBeenListed      chan struct{}
+	topicsListingErr          error // only valid after topicsHaveBeenListed is closed
 	mustRegisterTopics        bool
 	hasTxConsumers            bool
 	clientID                  string
@@ -143,6 +145,9 @@ type LibraryNoDB struct {
 	prefix                    string // prefixes all topics and consumer groups
 	consumeCtx                context.Context
 	produceCtx                context.Context
+	contextUpdate             chan struct{}
+	shutdownCtx               context.Context
+	shutdownCancel            context.CancelFunc
 	libraryDone               sync.WaitGroup
 
 	// lock must be held when....
@@ -241,6 +246,7 @@ type canHandle interface {
 // Configure() and Consume*() may not be used once consumption or production
 // has started.
 func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodels.AbstractDB[ID, TX]]() *Library[ID, TX, DB] {
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	lib := Library[ID, TX, DB]{
 		produceFromTable: make(chan []ID, produceFromTableBuffer),
 		LibraryNoDB: LibraryNoDB{
@@ -258,6 +264,9 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 			doEnhance:                true,
 			instanceID:               instanceCount.Add(1),
 			topicsHaveBeenListed:     make(chan struct{}),
+			contextUpdate:            make(chan struct{}),
+			shutdownCtx:              shutdownCtx,
+			shutdownCancel:           shutdownCancel,
 			sizeCapBrokerReady:       make(chan struct{}),
 			sizeCapDefaultAssumed:    1_000_000,
 			tracerProvider:           func(context.Context) eventmodels.Tracer { return log.Printf },
@@ -449,10 +458,11 @@ func (lib *Library[ID, TX, DB]) start(ctx context.Context, str string, args ...a
 }
 
 // Shutdown returns when the library is completely shut down.
-// If consumers were never started and a catch up producer was
-// never started, then produce may return before background threads
-// created by produce have completed. Shutdown does not cancel
-// the consume or catch-up-producer contects.
+// If StartConsuming or CatchUpProduce have been called, cancel their contexts
+// before calling Shutdown. Shutdown does not cancel those contexts.
+//
+// If StartConsuming and CatchUpProduce were never called, Shutdown should
+// be called to terminate library-owned background threads.
 func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
 	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, map[string]string{
 		"action": "wait for shutdown",
@@ -460,28 +470,28 @@ func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
 	defer spanDone()
 	consumeNotCancelled := false
 	produceNotCancelled := false
-	if func() bool {
-		defer lib.lock.Unlock()
+	func() {
 		lib.lock.Lock()
+		defer lib.lock.Unlock()
 		lib.ready.Store(isShutdown)
+		if lib.shutdownCancel != nil {
+			lib.shutdownCancel()
+			lib.shutdownCancel = nil
+		}
 		if lib.consumeCtx != nil && lib.consumeCtx.Err() == nil {
 			consumeNotCancelled = true
 		}
 		if lib.produceCtx != nil && lib.produceCtx.Err() == nil {
 			produceNotCancelled = true
 		}
-		return lib.consumeCtx != nil || lib.produceCtx != nil
-	}() {
-		if consumeNotCancelled {
-			lib.tracerProvider(ctx)("[events] Shutdown called when the consume context has not been cancelled")
-		}
-		if produceNotCancelled {
-			lib.tracerProvider(ctx)("[events] Shutdown called when the catch up producer context has not been cancelled")
-		}
-		// only wait if consumers or catch-up-producer
-		// was started
-		lib.libraryDone.Wait()
+	}()
+	if consumeNotCancelled {
+		lib.tracerProvider(ctx)("[events] Shutdown called when the consume context has not been cancelled")
 	}
+	if produceNotCancelled {
+		lib.tracerProvider(ctx)("[events] Shutdown called when the catch up producer context has not been cancelled")
+	}
+	lib.libraryDone.Wait()
 }
 
 func (lib *Library[ID, TX, DB]) ConfigureBroadcastHeartbeat(dur time.Duration) {
@@ -947,14 +957,67 @@ func (lib *LibraryNoDB) logf(ctx context.Context, format string, a ...any) {
 	lib.tracerProvider(ctx)(format, a...)
 }
 
+// TODO: remove this code gate once dynamic threadContext lifecycle handling is stable in production.
+var gateEventsThreadContextLifecycle = codegate.New("EventsThreadContextLifecycle")
+
 // threadContext cancels the returned context at the earlier of:
-// - when the returned done() func is called
-// - when both consume and catch-up-produce are cancelled
-// The returned context has a span. It is cancelled when the
-// returned done is called.
-// The provided context is only used if there is no consume and
-// no catch-up-produce invocation.
+//   - when the returned done() func is called
+//   - when all registered consume and catch-up-produce contexts are cancelled
+//   - when Shutdown is called before any library lifecycle contexts are registered
+//
+// The returned context has a span. It is cancelled when the returned done is called.
+// TODO: remove backupCtx when removing gateEventsThreadContextLifecycle.
 func (lib *LibraryNoDB) threadContext(backupCtx context.Context, spanMap map[string]string) (context.Context, func()) {
+	if !gateEventsThreadContextLifecycle.Enabled() {
+		return lib.threadContextOld(backupCtx, spanMap)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, spanMap)
+	lib.libraryDone.Add(2)
+	go func() {
+		defer lib.libraryDone.Done()
+		defer cancel()
+	Outer:
+		for {
+			waitFor, update := lib.contextsToWaitFor()
+			if len(waitFor) == 0 {
+				select {
+				case <-ctx.Done():
+					// done function used
+					return
+				case <-lib.shutdownCtx.Done():
+					return
+				case <-update:
+					continue
+				}
+			}
+			for len(waitFor) > 0 {
+				select {
+				case <-ctx.Done():
+					// done function used
+					return
+				case <-update:
+					// A consume or catch-up-produce context was registered while
+					// this thread was already waiting. Re-snapshot so this thread
+					// follows the latest library lifecycle.
+					continue Outer
+				case <-waitFor[0].Done():
+					waitFor = waitFor[1:]
+				}
+			}
+			return
+		}
+	}()
+	// We don't call spanDone in the goroutine. Wait for the returned done
+	// function so the caller controls the span lifetime.
+	return ctx, func() {
+		defer lib.libraryDone.Done()
+		defer spanDone()
+		cancel()
+	}
+}
+
+func (lib *LibraryNoDB) threadContextOld(backupCtx context.Context, spanMap map[string]string) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx, spanDone := lib.tracerConfig.BeginSpan(ctx, spanMap)
 	waitFor := make([]context.Context, 0, 2)
@@ -989,4 +1052,24 @@ func (lib *LibraryNoDB) threadContext(backupCtx context.Context, spanMap map[str
 		cancel()
 		spanDone()
 	}
+}
+
+func (lib *LibraryNoDB) contextsToWaitFor() ([]context.Context, <-chan struct{}) {
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	waitFor := make([]context.Context, 0, 2)
+	if lib.consumeCtx != nil {
+		waitFor = append(waitFor, lib.consumeCtx)
+	}
+	if lib.produceCtx != nil {
+		waitFor = append(waitFor, lib.produceCtx)
+	}
+	return waitFor, lib.contextUpdate
+}
+
+// notifyContextUpdateLocked broadcasts that consumeCtx or produceCtx was
+// registered or replaced. lib.lock must be held by the caller.
+func (lib *LibraryNoDB) notifyContextUpdateLocked() {
+	close(lib.contextUpdate)
+	lib.contextUpdate = make(chan struct{})
 }

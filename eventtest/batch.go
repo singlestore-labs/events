@@ -21,9 +21,11 @@ import (
 )
 
 const (
-	smallBatchSleep = time.Millisecond * 600
-	eventsToSend    = 200
-	maxWait         = 30 * time.Second
+	smallBatchSleep        = time.Millisecond * 600
+	eventsToSend           = 200
+	maxWait                = 30 * time.Second
+	broadcastMaxWait       = 75 * time.Second
+	broadcastTestHeartbeat = broadcastMaxWait * 2
 )
 
 type batchDeliveryInfo struct {
@@ -76,6 +78,7 @@ func runTest[ID eventmodels.AbstractID[ID], TX eventmodels.EnhancedTX, DB Augmen
 	events []eventmodels.ProducingEvent,
 	cancel Cancel,
 	info *batchDeliveryInfo,
+	deliveryWait time.Duration,
 ) {
 	defer cancel()
 
@@ -109,7 +112,7 @@ func runTest[ID eventmodels.AbstractID[ID], TX eventmodels.EnhancedTX, DB Augmen
 		require.FailNow(t, "timeout", "aborted waiting for completion")
 	case <-info.done:
 		t.Log("delivery completed")
-	case <-time.After(maxWait):
+	case <-time.After(deliveryWait):
 		t.Log("timeout")
 		require.FailNow(t, "timeout", "aborted waiting for completion")
 	}
@@ -186,7 +189,7 @@ func BatchDeliveryIdempotentTest[
 	info, handler := createHandler[ID, TX, DB](t, "idempotent")
 	lib.ConsumeIdempotent(consumerGroup, eventmodels.OnFailureDiscard, Name(t)+"-CI", topic.BatchHandler(handler))
 
-	runTest(ctx, t, lib, events, cancel, info)
+	runTest(ctx, t, lib, events, cancel, info, maxWait)
 }
 
 func BatchDeliveryBroadcastTest[
@@ -204,9 +207,12 @@ func BatchDeliveryBroadcastTest[
 	t, lib, topic, _, events := batchTestCommon(ctx, t, conn, brokers, "BDB", prefix)
 
 	info, handler := createHandler[ID, TX, DB](t, "broadcast")
+	// Avoid masking the broadcast reader idle timeout with heartbeat traffic while
+	// this test is waiting for application-topic delivery.
+	lib.ConfigureBroadcastHeartbeat(broadcastTestHeartbeat)
 	lib.ConsumeBroadcast(Name(t)+"CB", topic.BatchHandler(handler))
 
-	runTest(ctx, t, lib, events, cancel, info)
+	runTest(ctx, t, lib, events, cancel, info, broadcastMaxWait)
 }
 
 func BatchDeliveryExactlyOnceTest[
@@ -232,5 +238,5 @@ func BatchDeliveryExactlyOnceTest[
 			return handler(ctx, events)
 		}))
 
-	runTest(ctx, t, lib, events, cancel, info)
+	runTest(ctx, t, lib, events, cancel, info, maxWait)
 }
