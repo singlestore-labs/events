@@ -19,7 +19,7 @@ import (
 
 var debugProduce = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
 
-// ProduceTransactionTimeout caps how long Produce may run when it is called
+// produceTransactionTimeout caps how long Produce may run when it is called
 // with a database transaction open, which is the case for ProduceInTransaction
 // and ProduceCatchUp. Those callers select and delete rows from eventsOutgoing
 // and then produce to Kafka before committing.
@@ -32,11 +32,7 @@ var debugProduce = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
 //
 // On timeout the transaction rolls back, undoing the uncommitted deletes, and
 // the events are sent by a later catch-up pass.
-const ProduceTransactionTimeout = 5 * time.Minute
-
-// ErrProduceTransactionTimeout is returned when Produce does not finish before
-// ProduceTransactionTimeout while a database transaction is open.
-const ErrProduceTransactionTimeout errors.String = "kafka produce timed out while a database transaction was open"
+const produceTransactionTimeout = 5 * time.Minute
 
 // Produce sends events directly to Kafka. It is not transactional. Use tx.Produce to produce
 // from within a transaction.
@@ -51,12 +47,9 @@ func (lib *Library[ID, TX, DB]) Produce(ctx context.Context, method eventmodels.
 	switch method {
 	case eventmodels.ProduceInTransaction, eventmodels.ProduceCatchUp:
 		// The caller is holding a database transaction open around this call.
-		var cancel context.CancelFunc
-		ctx, cancel = boundProduceContext(ctx, ProduceTransactionTimeout)
+		var cancel func()
+		ctx, cancel = context.WithTimeout(ctx, produceTransactionTimeout)
 		defer cancel()
-		defer func() {
-			err = wrapProduceTimeout(ctx, err)
-		}()
 	}
 	if debugProduce {
 		defer func() {
@@ -210,25 +203,6 @@ func (lib *Library[ID, TX, DB]) tryTransactionalWriteWithBroker(ctx context.Cont
 	lib.logf(ctx, "[events] successfully wrote %d fallback transactional messages to broker %s", len(messages), broker)
 
 	return nil
-}
-
-// boundProduceContext returns a child context that expires after timeout, or
-// sooner if ctx already has an earlier deadline.
-func boundProduceContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= timeout {
-		return context.WithCancel(ctx)
-	}
-	return context.WithTimeout(ctx, timeout)
-}
-
-func wrapProduceTimeout(boundCtx context.Context, err error) error {
-	if err == nil {
-		return nil
-	}
-	if boundCtx.Err() == context.DeadlineExceeded && errors.Is(err, context.DeadlineExceeded) {
-		return ErrProduceTransactionTimeout.Errorf("%w", err)
-	}
-	return err
 }
 
 // ProduceFromTable is used to send events that have been written during a
