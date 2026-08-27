@@ -249,9 +249,11 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventsByTo
 // CatchUpProduce starts a background thread that looks for events that were written to the
 // database during a transaction but were not sent to Kafka.
 //
-// Produce from that path holds a database transaction open while talking to Kafka.
-// Kafka retries are bounded (see eventdb.ProduceInTransactionTimeout) so a broker
-// outage cannot leave the transaction idle for hours and pin PostgreSQL WAL.
+// Produce from that path holds its own outgoing-table transaction open while
+// talking to Kafka. Kafka retries are bounded (see
+// eventdb.BackgroundProduceTransactionTimeout) so a broker outage cannot leave
+// that transaction idle for hours. This is separate from the application
+// transaction in which tx.Produce saved the event.
 //
 // The returned channel is closed when CatchUpProduce shuts down (due to context cancel)
 //

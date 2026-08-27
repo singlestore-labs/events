@@ -31,16 +31,16 @@ func TestBoundProduceContextKeepsShorterParentDeadline(t *testing.T) {
 	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
 }
 
-func TestWrapProduceInTransactionTimeout(t *testing.T) {
+func TestWrapBackgroundProduceTransactionTimeout(t *testing.T) {
 	ctx, cancel := boundProduceContext(context.Background(), time.Millisecond)
 	defer cancel()
 	<-ctx.Done()
 	err := wrapProduceInTransactionError(ctx, ctx.Err())
-	require.ErrorIs(t, err, ErrProduceInTransactionTimeout)
+	require.ErrorIs(t, err, ErrBackgroundProduceTransactionTimeout)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
-func TestWrapProduceInTransactionTimeoutLeavesOtherErrors(t *testing.T) {
+func TestWrapBackgroundProduceTransactionTimeoutLeavesOtherErrors(t *testing.T) {
 	err := wrapProduceInTransactionError(context.Background(), assert.AnError)
 	require.Equal(t, assert.AnError, err)
 }
