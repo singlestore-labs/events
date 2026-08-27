@@ -127,7 +127,6 @@ func (lib *LibraryNoDB) dialer() *kafka.Dialer {
 	return &kafka.Dialer{
 		ClientID:      lib.clientID,
 		Timeout:       dialTimeout * time.Duration(nBrokers), // timeout is divided by number of brokers
-		DualStack:     true,
 		KeepAlive:     time.Second * 5,
 		SASLMechanism: lib.mechanism,
 		TLS:           lib.tlsConfig,
@@ -137,8 +136,7 @@ func (lib *LibraryNoDB) dialer() *kafka.Dialer {
 func (lib *LibraryNoDB) transport() *kafka.Transport {
 	return &kafka.Transport{
 		Dial: (&net.Dialer{
-			Timeout:   dialTimeout,
-			DualStack: true,
+			Timeout: dialTimeout,
 		}).DialContext,
 		ClientID:    lib.clientID,
 		DialTimeout: time.Second * 5,
