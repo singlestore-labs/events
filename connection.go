@@ -339,10 +339,9 @@ func (lib *Library[ID, TX, DB]) DoNotLockBroadcastConsumerNumbers() {
 	lib.broadcastConsumerSkipLock = true
 }
 
-// SetLazyTxProduce controls what to do if a transaction produces an event but
-// the [Library] doesn't have a running producer. Defaults to false. If true, the
-// event will be left in the database for some other [Library] to pick up sometime
-// in the future.
+// SetLazyTxProduce is retained for compatibility. Post-commit flushing never
+// sends Kafka on the transaction caller, so events are left in the database
+// whenever this process has no running CatchUpProduce, regardless of this flag.
 //
 // Calling this after consumers have started or messages are being produced will panic.
 func (lib *Library[ID, TX, DB]) SetLazyTxProduce(lazy bool) {
