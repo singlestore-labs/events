@@ -191,22 +191,23 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 		return 0, nil // on purpose
 	default:
 	}
-	if len(ids) != 0 {
-		return produceSpecificEvents(ctx, db, method, ids, producer)
-	}
 	sb := sq.
 		Select("id").
 		From("eventsOutgoing").
 		Suffix("FOR UPDATE SKIP LOCKED")
 
-	// It's possible that this may lock more rows than are returned. If
-	// that happens, the extra rows will be unlocked when the transaction
-	// completes and some other producer can send them. It's better to
-	// over-lock than to under-limit because filling the limit is a signal
-	// to the CatchUpProducer that ProduceEvents should be called again
-	// right away.
-	sb = sb.Limit(uint64(limit)).
-		OrderBy("ts ASC", "sequenceNumber ASC")
+	if len(ids) == 0 {
+		// It's possible that this may lock more rows than are returned. If
+		// that happens, the extra rows will be unlocked when the transaction
+		// completes and some other producer can send them. It's better to
+		// over-lock than to under-limit because filling the limit is a signal
+		// to the CatchUpProducer that ProduceEvents should be called again
+		// right away.
+		sb = sb.Limit(uint64(limit)).
+			OrderBy("ts ASC", "sequenceNumber ASC")
+	} else {
+		sb = sb.Where(sq.Eq{"id": ids})
+	}
 	q, args, err := sb.PlaceholderFormat(sq.Dollar).ToSql()
 	if err != nil {
 		return 0, errors.Errorf("[Events] cannot build query to produce events: %w", err)
@@ -259,76 +260,6 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 		return nil
 	})
 	return count, err
-}
-
-// produceSpecificEvents is the best-effort flush after an application
-// transaction commits. It intentionally does not open another explicit
-// database transaction around Kafka I/O. Rows are deleted only after Kafka
-// succeeds; a crash or error can therefore cause duplicates, consistent with
-// the library's at-least-once guarantee.
-func produceSpecificEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](
-	ctx context.Context,
-	db DB,
-	method eventmodels.ProduceMethod,
-	ids []eventmodels.StringEventID,
-	producer eventmodels.Producer[eventmodels.StringEventID, TX],
-) (int, error) {
-	q, args, err := sq.
-		Select("id", "topic", "ts", "sequenceNumber", "key", "data", "headers").
-		From("eventsOutgoing").
-		Where(sq.Eq{"id": ids}).
-		OrderBy("ts", "sequenceNumber").
-		PlaceholderFormat(sq.Dollar).
-		ToSql()
-	if err != nil {
-		return 0, errors.WithStack(err)
-	}
-	rows, err := db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return 0, errors.WithStack(err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var toProduce []*eventdb.ProducingEventBlob[eventmodels.StringEventID]
-	for rows.Next() {
-		var blob eventdb.ProducingEventBlob[eventmodels.StringEventID]
-		if err := rows.Scan(&blob.ID, &blob.KafkaTopic, &blob.TS, &blob.SequenceNumber, &blob.K, &blob.Data, &blob.EncodedHeader); err != nil {
-			return 0, errors.WithStack(err)
-		}
-		if err := json.Unmarshal(blob.EncodedHeader, &blob.HeaderMap); err != nil {
-			return 0, errors.Errorf("produce cannot unmarshal event header map: %w", err)
-		}
-		if _, ok := blob.HeaderMap["id"]; !ok {
-			blob.HeaderMap["id"] = []string{blob.ID.String()}
-		}
-		toProduce = append(toProduce, &blob)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, errors.WithStack(err)
-	}
-	if len(toProduce) == 0 {
-		return 0, sql.ErrNoRows
-	}
-	if err := rows.Close(); err != nil {
-		return 0, errors.WithStack(err)
-	}
-	if err := producer.Produce(ctx, method, generic.TransformSlice(toProduce,
-		func(blob *eventdb.ProducingEventBlob[eventmodels.StringEventID]) eventmodels.ProducingEvent {
-			return eventmodels.ProducingEvent(blob)
-		})...); err != nil {
-		return len(toProduce), err
-	}
-	deleteQ, deleteArgs, err := sq.Delete("eventsOutgoing").
-		Where(sq.Eq{"id": ids}).
-		PlaceholderFormat(sq.Dollar).
-		ToSql()
-	if err != nil {
-		return len(toProduce), errors.WithStack(err)
-	}
-	if _, err := db.ExecContext(ctx, deleteQ, deleteArgs...); err != nil {
-		return len(toProduce), errors.WithStack(err)
-	}
-	return len(toProduce), nil
 }
 
 func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {

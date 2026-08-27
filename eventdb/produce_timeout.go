@@ -15,6 +15,11 @@ import (
 // until the context is cancelled. CatchUpProduce uses a process-lifetime
 // context, so those retries previously held a transaction for hours.
 //
+// This applies to both background produce paths, since an application
+// transaction only hands event ids to CatchUpProduce over a channel and never
+// produces to Kafka itself: the batch of ids received on that channel, and the
+// scan for dropped events.
+//
 // On timeout the transaction rolls back, so the uncommitted delete is undone
 // and CatchUpProduce can retry later.
 const BackgroundProduceTransactionTimeout = 5 * time.Minute
