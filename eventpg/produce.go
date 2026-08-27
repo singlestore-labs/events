@@ -250,7 +250,7 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 			return sql.ErrNoRows
 		}
 		count = len(toProduce)
-		err = eventdb.ProduceFromOutgoingTable(ctx, producer, method, generic.TransformSlice(toProduce,
+		err = producer.Produce(ctx, method, generic.TransformSlice(toProduce,
 			func(blob *eventdb.ProducingEventBlob[eventmodels.StringEventID]) eventmodels.ProducingEvent {
 				return eventmodels.ProducingEvent(blob)
 			})...)

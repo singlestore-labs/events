@@ -1,4 +1,4 @@
-package eventdb
+package events
 
 import (
 	"context"
