@@ -222,12 +222,14 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 	var count int
 	err = db.Transact(ctx, func(tx TX) (finalErr error) {
 		// Bound idle-in-transaction time as a database-side backstop. Kafka
-		// produce happens before commit; if the Go timeout is ignored, Postgres
-		// will still abort this session instead of pinning WAL for hours.
+		// produce happens before commit; if the Go deadline is somehow not
+		// honored, PostgreSQL still ends this session rather than pinning WAL
+		// for hours. This is only a backstop, so a server that rejects the
+		// setting must not fail the produce.
 		_, idleErr := tx.ExecContext(ctx, `SET LOCAL idle_in_transaction_session_timeout = `+
-			strconv.FormatInt(eventdb.ProduceInTransactionTimeout.Milliseconds(), 10))
+			strconv.FormatInt(eventdb.ProduceInTransactionIdleTimeout.Milliseconds(), 10))
 		if idleErr != nil {
-			return errors.Errorf("cannot set idle_in_transaction_session_timeout for event produce: %w", idleErr)
+			producer.TracerProvider(ctx)("[events] could not set idle_in_transaction_session_timeout, relying on the produce deadline alone: %s", idleErr)
 		}
 		rows, err := tx.QueryContext(ctx, q, args...)
 		if err != nil {

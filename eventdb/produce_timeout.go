@@ -25,6 +25,13 @@ const ProduceInTransactionTimeout = time.Minute
 // finish before ProduceInTransactionTimeout while a DB transaction is open.
 const ErrProduceInTransactionTimeout errors.String = "kafka produce timed out while a database transaction was open"
 
+// ProduceInTransactionIdleTimeout is for database-side idle-transaction limits
+// that back up ProduceInTransactionTimeout. It is deliberately longer so that
+// the Go deadline wins the race in normal operation: cancelling the context
+// rolls the transaction back cleanly, whereas PostgreSQL's
+// idle_in_transaction_session_timeout terminates the whole session.
+const ProduceInTransactionIdleTimeout = 2 * ProduceInTransactionTimeout
+
 // BoundProduceContext returns a child context that expires after
 // ProduceInTransactionTimeout, or sooner if ctx already has an earlier deadline.
 func BoundProduceContext(ctx context.Context) (context.Context, context.CancelFunc) {
