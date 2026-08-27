@@ -183,15 +183,10 @@ func (lib *Library[ID, TX, DB]) tryTransactionalWriteWithBroker(ctx context.Cont
 	return nil
 }
 
-// ProduceFromTable is used after an application transaction commits to nudge
-// sending of events that were saved in that transaction. It must not talk to
-// Kafka on the caller's goroutine: at most it does a non-blocking handoff to
-// CatchUpProduce. Topics were already validated while saving the events.
-//
-// If a CatchUpProducer is running, the event ids are forwarded to that thread
-// (or dropped on the floor if the channel is full; CatchUpProduce will find
-// them in the table). If not, the events stay in the database until some
-// CatchUpProduce picks them up.
+// ProduceFromTable is used to send events that have been written during a
+// transaction. If a CatchUpProducer is running, the events will be forwarded
+// to that thread. If not, they'll be sent to Kafka synchronously. Sending to
+// Kafka synchronously is slow.
 //
 // ProduceFromTable can only be used after Configure.
 func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventsByTopic map[string][]ID) error {
@@ -213,42 +208,46 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventsByTo
 	if eventCount == 0 {
 		return nil
 	}
-	if lib.producerRunning.Load() == 0 {
-		// Do not produce on the transaction caller. CatchUpProduce, here or in
-		// another process, will send the rows later.
-		if debugProduce {
-			lib.logf(ctx, "[events] debug: produce from table deferred because no producer is running")
-		}
-		ProduceFromTxSplit.WithLabelValues("deferred").Inc()
-		return nil
-	}
 	eventIDs := make([]ID, 0, eventCount)
 	for _, events := range eventsByTopic {
 		eventIDs = append(eventIDs, events...)
 	}
-	select {
-	case lib.produceFromTable <- eventIDs:
-		ProduceFromTxSplit.WithLabelValues("async").Inc()
-		return nil
-	default:
-		// the channel is full, we're going to let CatchUpProduce
-		// handle it
-		if debugProduce {
-			lib.logf(ctx, "[events] debug: produce from table channel is full")
+	err = lib.ValidateTopics(ctx, generic.Keys(eventsByTopic))
+	if err != nil {
+		return err
+	}
+	if lib.producerRunning.Load() != 0 {
+		select {
+		case lib.produceFromTable <- eventIDs:
+			ProduceFromTxSplit.WithLabelValues("async").Inc()
+			return nil
+		default:
+			// the channel is full, we're going to let CatchUpProduce
+			// handle it
+			if debugProduce {
+				lib.logf(ctx, "[events] debug: produce from table channel is full")
+			}
+			ProduceFromTxSplit.WithLabelValues("catch-up").Inc()
+			return nil
 		}
-		ProduceFromTxSplit.WithLabelValues("catch-up").Inc()
+	}
+	if lib.lazyProduce {
 		return nil
 	}
+	if !lib.HasDB() {
+		return errors.Errorf("cannot produce from table with nil db")
+	}
+	if debugProduce {
+		lib.logf(ctx, "[events] debug: produceFromTable producing synchronously because no producer is running")
+	}
+	ProduceFromTxSplit.WithLabelValues("sync").Inc()
+	_ = lib.ProduceSyncCount.Add(uint64(len(eventIDs)))
+	_, err = lib.db.ProduceSpecificTxEvents(ctx, eventIDs)
+	return err
 }
 
 // CatchUpProduce starts a background thread that looks for events that were written to the
-// database during a transaction but were not sent to Kafka.
-//
-// Produce from that path holds its own outgoing-table transaction open while
-// talking to Kafka. Kafka retries are bounded (see
-// eventdb.BackgroundProduceTransactionTimeout) so a broker outage cannot leave
-// that transaction idle for hours. This is separate from the application
-// transaction in which tx.Produce saved the event.
+// database during a transaction but were not sent to Kafka
 //
 // The returned channel is closed when CatchUpProduce shuts down (due to context cancel)
 //

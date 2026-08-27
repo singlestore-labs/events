@@ -9,30 +9,27 @@ import (
 	"github.com/singlestore-labs/events/eventmodels"
 )
 
-// BackgroundProduceTransactionTimeout caps how long background Kafka produce
-// may run while its outgoing-table transaction is open. If Kafka is
-// unreachable (for example SASL auth failure), topic listing/creation retries
-// until the context is cancelled. CatchUpProduce uses a process-lifetime
-// context, so those retries previously held a transaction for hours.
+// ProduceTransactionTimeout caps how long Kafka produce may run while the
+// eventsOutgoing transaction is open. produceEvents locks and deletes rows in
+// that transaction and then produces to Kafka before committing. If Kafka is
+// unreachable (for example a SASL auth failure), topic listing and creation
+// retry until the context is cancelled, and CatchUpProduce supplies a
+// process-lifetime context, so the transaction could stay open for hours. An
+// open transaction that long holds back restart_lsn on PostgreSQL replication
+// slots and retains WAL.
 //
-// This applies to both background produce paths, since an application
-// transaction only hands event ids to CatchUpProduce over a channel and never
-// produces to Kafka itself: the batch of ids received on that channel, and the
-// scan for dropped events.
-//
-// On timeout the transaction rolls back, so the uncommitted delete is undone
-// and CatchUpProduce can retry later.
-const BackgroundProduceTransactionTimeout = 5 * time.Minute
+// On timeout the transaction rolls back, undoing the uncommitted deletes, and
+// the events are produced by a later catch-up pass.
+const ProduceTransactionTimeout = 5 * time.Minute
 
-// ErrBackgroundProduceTransactionTimeout is returned when background Kafka
-// produce does not finish before BackgroundProduceTransactionTimeout.
-const ErrBackgroundProduceTransactionTimeout errors.String = "background kafka produce transaction timed out"
+// ErrProduceTransactionTimeout is returned when Kafka produce does not finish
+// before ProduceTransactionTimeout while the eventsOutgoing transaction is open.
+const ErrProduceTransactionTimeout errors.String = "kafka produce timed out while the outgoing events transaction was open"
 
 // BoundProduceContext returns a child context that expires after
-// BackgroundProduceTransactionTimeout, or sooner if ctx already has an earlier
-// deadline.
+// ProduceTransactionTimeout, or sooner if ctx already has an earlier deadline.
 func BoundProduceContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return boundProduceContext(ctx, BackgroundProduceTransactionTimeout)
+	return boundProduceContext(ctx, ProduceTransactionTimeout)
 }
 
 func boundProduceContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -45,9 +42,9 @@ func boundProduceContext(ctx context.Context, timeout time.Duration) (context.Co
 	return context.WithTimeout(ctx, timeout)
 }
 
-// ProduceFromOutgoingTable sends events selected/deleted by the transactional
-// background producer. The Kafka call is bounded so that transaction cannot
-// stay open indefinitely when brokers are down.
+// ProduceFromOutgoingTable produces events that were locked and deleted inside
+// the eventsOutgoing transaction. The Kafka call is bounded so that the
+// transaction cannot stay open indefinitely when brokers are unreachable.
 func ProduceFromOutgoingTable[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX](
 	ctx context.Context,
 	producer eventmodels.Producer[ID, TX],
@@ -57,15 +54,15 @@ func ProduceFromOutgoingTable[ID eventmodels.AbstractID[ID], TX eventmodels.Abst
 	ctx, cancel := BoundProduceContext(ctx)
 	defer cancel()
 	err := producer.Produce(ctx, method, events...)
-	return wrapProduceInTransactionError(ctx, err)
+	return wrapProduceTimeout(ctx, err)
 }
 
-func wrapProduceInTransactionError(boundCtx context.Context, err error) error {
+func wrapProduceTimeout(boundCtx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
 	if boundCtx.Err() == context.DeadlineExceeded && errors.Is(err, context.DeadlineExceeded) {
-		return ErrBackgroundProduceTransactionTimeout.Errorf("%w", err)
+		return ErrProduceTransactionTimeout.Errorf("%w", err)
 	}
 	return err
 }

@@ -42,10 +42,6 @@ type SaveEventsFunc[ID eventmodels.AbstractID[ID], TX BasicTX] func(context.Cont
 // It does not call itself recursively and insteads depends upon BeginTx
 // from BasicDB (in ComboDB).
 // backupTracer is only used if optProducer is nil.
-//
-// Events are saved inside the application transaction, but flushing those
-// saved events after commit is best effort. A flush failure must not make the
-// caller believe the already-committed application transaction was aborted.
 func Transact[ID eventmodels.AbstractID[ID], TX BasicTX, DB ComboDB[ID, TX]](
 	ctx context.Context,
 	db DB,
@@ -59,11 +55,9 @@ func Transact[ID eventmodels.AbstractID[ID], TX BasicTX, DB ComboDB[ID, TX]](
 		return err
 	}
 	if len(ids) != 0 && optProducer != nil {
-		if produceErr := optProducer.ProduceFromTable(ctx, ids); produceErr != nil {
-			_ = optProducer.RecordErrorNoWait(ctx, "postCommitProduce", produceErr)
-		}
+		err = optProducer.ProduceFromTable(ctx, ids)
 	}
-	return nil
+	return err
 }
 
 // WrapTransaction is a building block that can be shared between database-sprecific
