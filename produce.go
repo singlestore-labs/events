@@ -246,10 +246,32 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventsByTo
 	return err
 }
 
+// catchUpTransactionTimeout bounds each database operation started by
+// CatchUpProduce. Those operations hold a transaction open across the Kafka
+// send: rows are locked and deleted from eventsOutgoing, then produced, then
+// committed. Kafka topic listing and creation retry for as long as their
+// context lives, and the context here lives as long as the process, so an
+// unreachable Kafka (a SASL auth failure, say) could keep a transaction open
+// for hours. That holds back restart_lsn on PostgreSQL replication slots and
+// retains WAL.
+//
+// When it expires the transaction rolls back, undoing the uncommitted deletes,
+// and the events are sent by a later pass. A canceled Kafka write may still
+// reach the broker, so this can duplicate an event but cannot lose one, which
+// is the at-least-once behavior these events already have.
+//
+// Callers that produce by other routes supply their own context and are
+// responsible for their own deadlines.
+const catchUpTransactionTimeout = 5 * time.Minute
+
 // CatchUpProduce starts a background thread that looks for events that were written to the
 // database during a transaction but were not sent to Kafka
 //
 // The returned channel is closed when CatchUpProduce shuts down (due to context cancel)
+//
+// The context given here is expected to live as long as the process, so each
+// database operation it starts is bounded by catchUpTransactionTimeout rather
+// than running until ctx is cancelled.
 //
 // CatchUpProduce can only be used after Configure.
 func (lib *Library[ID, TX, DB]) CatchUpProduce(ctx context.Context, sleepTime time.Duration, batchSize int) (chan struct{}, error) {
@@ -285,7 +307,11 @@ func (lib *Library[ID, TX, DB]) CatchUpProduce(ctx context.Context, sleepTime ti
 		defer spanDone()
 		defer wg.Done()
 		send := func(ids []ID, tcount int) {
-			count, err := lib.db.ProduceSpecificTxEvents(ctx, ids)
+			count, err := func() (int, error) {
+				ctx, cancel := context.WithTimeout(ctx, catchUpTransactionTimeout)
+				defer cancel()
+				return lib.db.ProduceSpecificTxEvents(ctx, ids)
+			}()
 			if err == nil || errors.Is(err, sql.ErrNoRows) {
 				lib.logf(ctx, "[events] background producer sent %d out of %d events for %d transactions", count, len(ids), tcount)
 			} else {
@@ -342,7 +368,14 @@ func (lib *Library[ID, TX, DB]) CatchUpProduce(ctx context.Context, sleepTime ti
 		}
 		timer := time.NewTimer(sleepTime)
 		for {
-			_, err := lib.db.ProduceDroppedTxEvents(ctx, batchSize)
+			// ProduceDroppedTxEvents drains in a series of transactions, so
+			// this bounds the drain rather than any one of them. Whatever is
+			// left is picked up on the next pass.
+			_, err := func() (int, error) {
+				ctx, cancel := context.WithTimeout(ctx, catchUpTransactionTimeout)
+				defer cancel()
+				return lib.db.ProduceDroppedTxEvents(ctx, batchSize)
+			}()
 			if err != nil {
 				_ = lib.RecordErrorNoWait(ctx, "produceTxEvents", errors.Errorf("cannot produce dropped tx events: %w", err))
 			}
