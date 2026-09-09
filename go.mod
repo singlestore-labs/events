@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/Masterminds/squirrel v1.5.4
 	github.com/chrismcguire/gobberish v0.0.0-20150821175641-1d8adb509a0e
-	github.com/go-sql-driver/mysql v1.10.0
+	github.com/go-sql-driver/mysql v1.10.1
 	github.com/gofrs/uuid/v5 v5.4.0
 	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/backoff/v2 v2.0.8
