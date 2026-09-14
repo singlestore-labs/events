@@ -24,6 +24,8 @@ func decode[E any](message *kafka.Message, consumerGroup string, lib LibraryInte
 		Type:          unprefixedTopic,
 		Key:           string(message.Key),
 		Subject:       string(message.Key),
+		Partition:     message.Partition,
+		Offset:        message.Offset,
 		Headers:       make(http.Header),
 		Timestamp:     message.Time,
 		ConsumerGroup: consumerGroup,

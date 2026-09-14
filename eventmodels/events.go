@@ -32,6 +32,8 @@ type ProducingEvent interface {
 type Event[E any] struct {
 	Topic         string // may be a dead-letter topic. Un-prefixed.
 	Key           string
+	Partition     int
+	Offset        int64
 	Data          []byte
 	Payload       E
 	Headers       map[string][]string

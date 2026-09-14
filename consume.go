@@ -389,7 +389,9 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 	}()
 
 	lib.logf(ctx, "[events] consumer started for consumerGroup %s for %s", cgWithPrefix, group.Describe())
+	resetOrderedHandlers(group)
 	sequenceNumbers := make(map[int]int)
+	orderedSequenceNumbers := make(map[*registeredHandler]map[int]int)
 	// done is used to commit offsets for messages that have been processed
 	done := make(chan *messageAndSequenceNumber, commitQueueDepth)
 	// we pass groupDone rather than outstandingWork because the commits
@@ -452,6 +454,21 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 			lib.logf(ctx, "[events] Debug: ack sequence number assigned for %s %s %s is %d: %d", msg.Topic, string(msg.Key), cgWithPrefix, msg.Partition, sequenceNumber)
 		}
 		sequenceNumbers[msg.Partition]++
+		orderedSequences := make(map[*registeredHandler]int)
+		if handlers, ok := group.topics[lib.removePrefix(msg.Topic)]; ok {
+			for _, handler := range handlers.handlers {
+				if !handler.ordered {
+					continue
+				}
+				byPartition, ok := orderedSequenceNumbers[handler]
+				if !ok {
+					byPartition = make(map[int]int)
+					orderedSequenceNumbers[handler] = byPartition
+				}
+				orderedSequences[handler] = byPartition[msg.Partition]
+				byPartition[msg.Partition]++
+			}
+		}
 		ConsumeCounts.WithLabelValues(msg.Topic, cgWithPrefix).Inc()
 		ConsumersWaitingForQueueConcurrencyDemand.WithLabelValues(cgWithPrefix).Add(1)
 		ConsumersWaitingForQueueConcurrencyLimit.WithLabelValues(cgWithPrefix).Add(1)
@@ -462,7 +479,7 @@ func (lib *Library[ID, TX, DB]) consume(ctx context.Context, consumerGroup consu
 			lib.logf(ctx, "[events] Debug shutdown: outstandingWork deliver message +1 (%s)", cgWithPrefix)
 		}
 		outstandingWork.Add(1)
-		go lib.deliverOneMessage(ctx, msg, consumerGroup, cgWithPrefix, group, &outstandingWork, queuedLimit, sequenceNumber, done, activeLimiter)
+		go lib.deliverOneMessage(ctx, msg, consumerGroup, cgWithPrefix, group, &outstandingWork, queuedLimit, sequenceNumber, orderedSequences, done, activeLimiter)
 	}
 }
 
@@ -481,6 +498,7 @@ func (lib *Library[ID, TX, DB]) deliverOneMessage(
 	outstandingWork *sync.WaitGroup,
 	queuedLimit simultaneous.Limited[eventLimiterType],
 	sequenceNumber int,
+	orderedSequences map[*registeredHandler]int,
 	done chan *messageAndSequenceNumber,
 	activeLimiter *limit,
 ) {
@@ -530,7 +548,11 @@ func (lib *Library[ID, TX, DB]) deliverOneMessage(
 						lib.logf(ctx, "[events] Debug: delivering to handler %s without batching %s/%s in %s to %v", handlerName, msg.Topic, string(msg.Key), cgWithPrefix, handlers.handlerNames)
 					}
 					successes := []bool{false}
-					lib.callHandler(ctx, activeLimiter, handler, []*kafka.Message{&msg}, successes)
+					if handler.ordered {
+						lib.callOrderedHandler(ctx, activeLimiter, handler, &msg, orderedSequences[handler], successes)
+					} else {
+						lib.callHandler(ctx, activeLimiter, handler, []*kafka.Message{&msg}, successes)
+					}
 					waiters <- handlerSuccess{
 						handler: handler,
 						success: successes[0],
@@ -607,6 +629,37 @@ func (lib *Library[ID, TX, DB]) deliverOneMessage(
 	if debugAck {
 		lib.logf(ctx, "[events] Debug: queued for ack %s/%s in %s", msg.Topic, string(msg.Key), cgWithPrefix)
 	}
+}
+
+func resetOrderedHandlers(group *group) {
+	for _, handlers := range group.topics {
+		for _, handler := range handlers.handlers {
+			if !handler.ordered {
+				continue
+			}
+			handler.orderedLock.Lock()
+			handler.orderedNext = make(map[int]int)
+			handler.orderedLock.Unlock()
+		}
+	}
+}
+
+func (lib *Library[ID, TX, DB]) callOrderedHandler(
+	ctx context.Context,
+	activeLimiter *limit,
+	handler *registeredHandler,
+	message *kafka.Message,
+	sequenceNumber int,
+	successes []bool,
+) {
+	handler.orderedLock.Lock()
+	defer handler.orderedLock.Unlock()
+	for sequenceNumber != handler.orderedNext[message.Partition] {
+		handler.orderedCond.Wait()
+	}
+	lib.callHandler(ctx, activeLimiter, handler, []*kafka.Message{message}, successes)
+	handler.orderedNext[message.Partition]++
+	handler.orderedCond.Broadcast()
 }
 
 // formAndDeliverBatches runs as a go-routine, repeatedly grabbing a batch-worth
