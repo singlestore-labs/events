@@ -61,6 +61,20 @@ func (lib *LibraryNoDB) SetTopicConfig(topicConfig kafka.TopicConfig) {
 	lib.topicConfig[topicConfig.Topic] = topicConfig
 }
 
+// SetTopicKeyOrdering routes events with the same key to the same partition.
+// Use it for topics whose consumers require per-key causal ordering.
+//
+// Calling this after consumers or producers have started will panic.
+func (lib *Library[ID, TX, DB]) SetTopicKeyOrdering(topic string) {
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	lib.mustNotBeRunning("attempt configure event library that is already processing")
+	if err := lib.validateTopic(topic); err != nil {
+		panic(err)
+	}
+	lib.keyOrderedTopics[topic] = struct{}{}
+}
+
 func (lib *LibraryNoDB) getTopicConfig(unprefixedTopic string) (kafka.TopicConfig, bool) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()

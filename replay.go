@@ -15,6 +15,10 @@ import (
 // ReplayCursor stores the next offset to read for each topic partition.
 type ReplayCursor map[int]int64
 
+// ErrReplayCursorExpired indicates that Kafka no longer retains every event
+// needed to resume from a cursor. The caller must establish a fresh baseline.
+const ErrReplayCursorExpired errors.String = "event replay cursor expired"
+
 // ReplayRequest identifies the key and offsets from which replay should resume.
 type ReplayRequest struct {
 	Key    string
@@ -163,7 +167,13 @@ func (lib *Library[ID, TX, DB]) replayPartition(
 	}
 	startOffset, ok := request.Cursor[partition]
 	if !ok || startOffset < firstOffset {
-		startOffset = firstOffset
+		return nil, 0, ErrReplayCursorExpired.Errorf(
+			"topic (%s) partition (%d) starts at offset (%d), cursor requested (%d)",
+			topic,
+			partition,
+			firstOffset,
+			startOffset,
+		)
 	}
 	if startOffset > endOffset {
 		return nil, 0, errors.Errorf("event library replay cursor offset (%d) is after topic (%s) partition (%d) end offset (%d)", startOffset, topic, partition, endOffset)

@@ -120,6 +120,7 @@ type LibraryNoDB struct {
 	startTime                 time.Time
 	ready                     atomic.Int32
 	topicConfig               map[string]kafka.TopicConfig  // un-prefixed
+	keyOrderedTopics          map[string]struct{}           // un-prefixed
 	topicsWork                pwork.Work[string, topicsWhy] // un-prefixed in APIs
 	topicListingStarted       sync.Once
 	topicsHaveBeenListed      chan struct{}
@@ -226,6 +227,21 @@ type handlerSuccess struct {
 	success bool
 }
 
+type topicBalancer struct {
+	prefix           string
+	keyOrderedTopics map[string]struct{}
+	hash             kafka.Hash
+	leastBytes       kafka.LeastBytes
+}
+
+func (b *topicBalancer) Balance(message kafka.Message, partitions ...int) int {
+	topic := strings.TrimPrefix(message.Topic, b.prefix)
+	if _, ok := b.keyOrderedTopics[topic]; ok {
+		return b.hash.Balance(message, partitions...)
+	}
+	return b.leastBytes.Balance(message, partitions...)
+}
+
 type HandlerOpt func(*registeredHandler, *LibraryNoDB)
 
 type canHandle interface {
@@ -261,6 +277,7 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 				maxIdle: broadcastReaderIdleTimeout,
 			},
 			topicConfig:              make(map[string]kafka.TopicConfig),
+			keyOrderedTopics:         make(map[string]struct{}),
 			clientID:                 uuid.New().String(),
 			broadcastHeartbeat:       baseBroadcastHeartbeat,
 			heartbeatRandomness:      broadcastHeartbeatRandom,
@@ -456,6 +473,10 @@ func (lib *Library[ID, TX, DB]) start(ctx context.Context, str string, args ...a
 	lib.writer = kafka.NewWriter(kafka.WriterConfig{
 		Brokers: lib.brokers,
 		Dialer:  lib.dialer(),
+		Balancer: &topicBalancer{
+			prefix:           lib.prefix,
+			keyOrderedTopics: lib.keyOrderedTopics,
+		},
 	})
 	lib.ready.Store(isRunning)
 	return nil
