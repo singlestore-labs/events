@@ -210,6 +210,10 @@ type registeredHandler struct {
 	waitingBatch       []messageAndDone
 	batchLock          sync.Mutex
 	batchesRunning     int
+	ordered            bool
+	orderedLock        sync.Mutex
+	orderedCond        *sync.Cond
+	orderedNext        map[int]int
 }
 
 type messageAndDone struct {
@@ -659,6 +663,15 @@ func WithConcurrency(parallelism int) HandlerOpt {
 	}
 }
 
+// WithOrderedDelivery makes a handler process messages in the order they were
+// fetched within each partition. It also serializes delivery across partitions.
+// Use this when handler side effects or offset checkpoints depend on order.
+func WithOrderedDelivery() HandlerOpt {
+	return func(r *registeredHandler, _ *LibraryNoDB) {
+		r.ordered = true
+	}
+}
+
 // IsDeadLetterHandler can be used when registering a handler for dead letter topics.
 // Normally this is not needed as dead letter handlers are created automatically if
 // the consumer uses OnFailureRetryLater. Using IsDeadLetterHandler only makes sense
@@ -686,8 +699,10 @@ func (topicHandler *topicHandlers) addHandler(handlerName string, onFailure even
 		onFailure:          onFailure,
 		baseTopic:          handler.GetTopic(),
 		requestedBatchSize: 0, // any non-zero size causes single-threaded delivery
+		orderedNext:        make(map[int]int),
 		// consumerGroup is set later
 	}
+	r.orderedCond = sync.NewCond(&r.orderedLock)
 	if handler.Batch() {
 		r.batchParallelism = defaultBatchConcurrency
 		r.requestedBatchSize = defaultBatchSize
@@ -695,6 +710,9 @@ func (topicHandler *topicHandlers) addHandler(handlerName string, onFailure even
 	WithQueueDepthLimit(maximumHandlerOutstanding)(&r, lib)
 	for _, opt := range opts {
 		opt(&r, lib)
+	}
+	if r.ordered && (r.requestedBatchSize != 0 || r.batchParallelism != 0) {
+		panic(errors.Alertf("ordered delivery cannot be combined with batching for handler (%s)", handlerName))
 	}
 	if r.batchParallelism != 0 && r.requestedBatchSize == 0 {
 		r.requestedBatchSize = 1
