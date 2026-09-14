@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	stderrors "errors"
 	"sort"
 	"time"
 
@@ -70,8 +71,21 @@ func (lib *Library[ID, TX, DB]) Replay(
 	ctx context.Context,
 	request ReplayRequest,
 	handler eventmodels.HandlerInterface,
-) (ReplayCursor, error) {
+) (cursor ReplayCursor, err error) {
 	topic := handler.GetTopic()
+	startedAt := time.Now()
+	defer func() {
+		result := "success"
+		if err != nil {
+			result = "error"
+			if ctx.Err() != nil && stderrors.Is(err, ctx.Err()) {
+				result = "cancelled"
+			}
+		}
+		ReplayCounts.WithLabelValues(topic, result).Inc()
+		ReplayDuration.WithLabelValues(topic, result).Observe(time.Since(startedAt).Seconds())
+	}()
+
 	if err := lib.start(ctx, "replay topic (%s)", topic); err != nil {
 		return nil, err
 	}
@@ -88,7 +102,7 @@ func (lib *Library[ID, TX, DB]) Replay(
 		return nil, errors.Errorf("event library failed to list partitions for replay topic (%s): %w", topic, err)
 	}
 
-	cursor := make(ReplayCursor, len(partitions))
+	cursor = make(ReplayCursor, len(partitions))
 	messages := make([]*kafka.Message, 0)
 	for _, partition := range partitions {
 		partitionMessages, endOffset, err := lib.replayPartition(ctx, prefixedTopic, request, partition.ID)
@@ -173,6 +187,7 @@ func (lib *Library[ID, TX, DB]) replayPartition(
 		if err != nil {
 			return nil, 0, errors.Errorf("event library failed to replay topic (%s) partition (%d): %w", topic, partition, err)
 		}
+		ReplayMessagesScannedCounts.WithLabelValues(lib.removePrefix(topic)).Inc()
 		startOffset = message.Offset + 1
 		if request.Key != "" && string(message.Key) != request.Key {
 			continue

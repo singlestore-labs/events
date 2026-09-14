@@ -81,6 +81,31 @@ var HandlerPanicCounts = mustRegister(prometheus.NewCounterVec(
 	[]string{"handler_name", "topic"},
 ))
 
+var ReplayCounts = mustRegister(prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: prefix + "replay",
+		Help: "Number of historical event replay operations by topic and result",
+	},
+	[]string{"topic", "result"},
+))
+
+var ReplayDuration = mustRegister(prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Name:    prefix + "replay_duration_seconds",
+		Help:    "Duration of historical event replay operations by topic and result",
+		Buckets: []float64{.01, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+	},
+	[]string{"topic", "result"},
+))
+
+var ReplayMessagesScannedCounts = mustRegister(prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: prefix + "replay_messages_scanned",
+		Help: "Number of Kafka messages scanned during historical event replay by topic",
+	},
+	[]string{"topic"},
+))
+
 var HandlerSuccessCounts = mustRegister(prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: prefix + "handler_success",
