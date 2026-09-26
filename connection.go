@@ -119,7 +119,11 @@ type LibraryNoDB struct {
 	broadcast                 *group
 	startTime                 time.Time
 	ready                     atomic.Int32
-	topicConfig               map[string]kafka.TopicConfig  // un-prefixed
+	topicConfig               map[string]kafka.TopicConfig // un-prefixed
+	defaultRetention          time.Duration                // <=0 means do not set retention.ms
+	defaultSegment            time.Duration                // <=0 means do not set segment.ms
+	topicRetention            map[string]topicRetentionConfig
+	topicAdmin                topicAdmin                    // nil uses the cluster controller; tests may set this
 	topicsWork                pwork.Work[string, topicsWhy] // un-prefixed in APIs
 	topicListingStarted       sync.Once
 	topicsHaveBeenListed      chan struct{}
@@ -257,6 +261,7 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 				maxIdle: broadcastReaderIdleTimeout,
 			},
 			topicConfig:              make(map[string]kafka.TopicConfig),
+			topicRetention:           make(map[string]topicRetentionConfig),
 			clientID:                 uuid.New().String(),
 			broadcastHeartbeat:       baseBroadcastHeartbeat,
 			heartbeatRandomness:      broadcastHeartbeatRandom,

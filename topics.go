@@ -173,6 +173,7 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 				ConfigValue: "LogAppendTime",
 			})
 		}
+		tc.ConfigEntries = lib.withRetentionConfig(ctx, unprefixedTopic, append([]kafka.ConfigEntry(nil), tc.ConfigEntries...))
 
 		mir = getIntConfigValue(tc, "min.insync.replicas")
 		var ctr kafka.CreateTopicsRequest

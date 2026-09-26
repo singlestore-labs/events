@@ -44,11 +44,10 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(startupCtx context.Cont
 		}
 		dlTopic := DeadLetterTopic(topic, consumerGroup)
 		preCreate = append(preCreate, dlTopic)
-		// pre-configure the dead-letter topic to match the original topic
-		if config, ok := lib.getTopicConfig(topic); ok {
-			config.Topic = dlTopic
-			lib.SetTopicConfig(config)
-		}
+		// Dead-letter topics inherit the base topic's configuration, including a
+		// retention override stored separately from topicConfig. When the base
+		// topic has neither, ItemWork applies the library defaults.
+		lib.prepareDeadLetterTopicConfig(topic, dlTopic)
 	}
 	if len(preCreate) == 0 {
 		return
