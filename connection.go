@@ -110,16 +110,19 @@ type LibraryNoDB struct {
 
 	// Per-topic limits map (separate from creatingTopic). Keys are topic names.
 
-	tracerProvider            eventmodels.TracerProvider
-	tracerConfig              eventmodels.TracerConfig
-	hasDB                     atomic.Bool
-	brokers                   []string
-	writer                    *kafka.Writer
-	readers                   map[consumerGroupName]*group
-	broadcast                 *group
-	startTime                 time.Time
-	ready                     atomic.Int32
-	topicConfig               map[string]kafka.TopicConfig  // un-prefixed
+	tracerProvider eventmodels.TracerProvider
+	tracerConfig   eventmodels.TracerConfig
+	hasDB          atomic.Bool
+	brokers        []string
+	writer         *kafka.Writer
+	readers        map[consumerGroupName]*group
+	broadcast      *group
+	startTime      time.Time
+	ready          atomic.Int32
+	topicConfig    map[string]kafka.TopicConfig // un-prefixed
+	// deadLetterHook and writeMessagesForTest are test seams. They stay nil in production.
+	deadLetterHook            func(phase string)
+	writeMessagesForTest      func(context.Context, ...kafka.Message) error
 	topicsWork                pwork.Work[string, topicsWhy] // un-prefixed in APIs
 	topicListingStarted       sync.Once
 	topicsHaveBeenListed      chan struct{}
@@ -200,6 +203,7 @@ type registeredHandler struct {
 	handler            canHandle
 	name               string
 	onFailure          eventmodels.OnFailure
+	exactlyOnce        bool
 	isDeadLetter       bool
 	baseTopic          string
 	consumerGroup      consumerGroupName
@@ -524,7 +528,10 @@ func (lib *Library[ID, TX, DB]) ConsumeExactlyOnce(consumerGroup ConsumerGroupNa
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
 	lib.mustNotBeRunning("attempt configure event consumer in library that is already processing")
-	lib.getTopicHandler(consumerGroup, handler.GetTopic()).addHandler(handlerName, onFailure, &lib.LibraryNoDB, handler, opts)
+	handlerOpts := make([]HandlerOpt, len(opts)+1)
+	copy(handlerOpts, opts)
+	handlerOpts[len(opts)] = withExactlyOnce()
+	lib.getTopicHandler(consumerGroup, handler.GetTopic()).addHandler(handlerName, onFailure, &lib.LibraryNoDB, handler, handlerOpts)
 	lib.hasTxConsumers = true
 }
 
@@ -656,6 +663,12 @@ func WithBatch(size int) HandlerOpt {
 func WithConcurrency(parallelism int) HandlerOpt {
 	return func(r *registeredHandler, lib *LibraryNoDB) {
 		r.batchParallelism = parallelism
+	}
+}
+
+func withExactlyOnce() HandlerOpt {
+	return func(r *registeredHandler, _ *LibraryNoDB) {
+		r.exactlyOnce = true
 	}
 }
 

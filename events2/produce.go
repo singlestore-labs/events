@@ -83,14 +83,106 @@ func Migrations(database *libschema.Database, singlestore *lssinglestore.SingleS
 				source		varchar(255)			NOT NULL,
 				id		varchar(255)			NOT NULL,
 				processedAt	datetime(6),
+				lastSeenAt	datetime(6)			NOT NULL DEFAULT now(6),
 				PRIMARY KEY	(topic, source, id, handlerName),
 				SHARD KEY	(topic, source, id, handlerName)
 			)
 			COMMENT 'persistent data to track exactly-once consumer deliveries'`),
+
+		lssinglestore.Script("add-eventsProcessed-lastSeenAt", `
+			ALTER TABLE eventsProcessed ADD COLUMN lastSeenAt datetime(6) NULL`,
+			libschema.SkipIf(func() (bool, error) {
+				return singlestore.DoesColumnExist("eventsProcessed", "lastSeenAt")
+			}),
+		),
+
+		lssinglestore.Computed[*sql.DB]("backfill-eventsProcessed-lastSeenAt", backfillEventsProcessedLastSeenAt,
+			libschema.SkipIf(func() (bool, error) {
+				return eventsProcessedLastSeenAtBackfillDone(singlestore)
+			}),
+		),
+
+		lssinglestore.Script("eventsProcessed-lastSeenAt-not-null", `
+			ALTER TABLE eventsProcessed MODIFY COLUMN lastSeenAt datetime(6) NOT NULL DEFAULT now(6)`,
+			libschema.SkipIf(func() (bool, error) {
+				return eventsProcessedLastSeenAtNotNull(singlestore)
+			}),
+		),
+
+		lssinglestore.Script("eventsProcessed-topic-lastSeenAt-index", `
+			CREATE INDEX eventsProcessed_topic_lastSeenAt_idx ON eventsProcessed (topic, lastSeenAt)`,
+			libschema.SkipIf(func() (bool, error) {
+				return singlestore.TableHasIndex("eventsProcessed", "eventsProcessed_topic_lastSeenAt_idx")
+			}),
+		),
 	)
 }
 
+const eventsProcessedBackfillBatch = 1000
+
+func eventsProcessedLastSeenAtBackfillDone(singlestore *lssinglestore.SingleStore) (bool, error) {
+	exists, err := singlestore.DoesColumnExist("eventsProcessed", "lastSeenAt")
+	if err != nil || !exists {
+		return false, err
+	}
+	var n int
+	err = singlestore.DB().QueryRow(`SELECT COUNT(*) FROM eventsProcessed WHERE lastSeenAt IS NULL`).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n == 0, nil
+}
+
+func eventsProcessedLastSeenAtNotNull(singlestore *lssinglestore.SingleStore) (bool, error) {
+	database, err := singlestore.DatabaseName()
+	if err != nil {
+		return false, err
+	}
+	var nullable string
+	err = singlestore.DB().QueryRow(`
+		SELECT is_nullable
+		FROM information_schema.columns
+		WHERE table_schema = ?
+		  AND table_name = 'eventsProcessed'
+		  AND column_name = 'lastSeenAt'`, database).Scan(&nullable)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return nullable == "NO", nil
+}
+
+func backfillEventsProcessedLastSeenAt(ctx context.Context, db *sql.DB) error {
+	migrationTime := time.Now().UTC().Format("2006-01-02 15:04:05.000000")
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		result, err := db.ExecContext(ctx, `
+			UPDATE eventsProcessed
+			SET lastSeenAt = ?
+			WHERE lastSeenAt IS NULL
+			LIMIT ?`, migrationTime, eventsProcessedBackfillBatch)
+		if err != nil {
+			return errors.Errorf("backfill eventsProcessed.lastSeenAt: %w", err)
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return errors.Errorf("backfill eventsProcessed.lastSeenAt: %w", err)
+		}
+		if n == 0 {
+			return nil
+		}
+	}
+}
+
 var _ eventmodels.AbstractDB[eventmodels.BinaryEventID, eventdb.BasicTX] = &Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
+
+var _ eventmodels.CanMarkEventProcessedAt[eventdb.BasicTX] = Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
+
+var _ eventmodels.CanTouchEventProcessed = Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
 
 var _ eventmodels.CanAugment[eventmodels.BinaryEventID, eventdb.BasicTX] = &Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
 
@@ -130,6 +222,14 @@ func (c *Connection[TX, DB]) ProduceDroppedTxEvents(ctx context.Context, batchSi
 
 func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
+}
+
+func (c Connection[TX, DB]) MarkEventProcessedAt(ctx context.Context, tx TX, topic string, source string, id string, handlerName string, appendTime time.Time) error {
+	return MarkEventProcessedAt[TX](ctx, tx, topic, source, id, handlerName, appendTime)
+}
+
+func (c Connection[TX, DB]) TouchEventProcessed(ctx context.Context, topic string, source string, id string, handlerName string, timestamp time.Time) error {
+	return TouchEventProcessed(ctx, c, topic, source, id, handlerName, timestamp)
 }
 
 func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
@@ -345,10 +445,19 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 }
 
 func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
+	return MarkEventProcessedAt[TX](ctx, tx, topic, source, id, handlerName, time.Time{})
+}
+
+func MarkEventProcessedAt[TX eventmodels.AbstractTX](ctx context.Context, tx TX, topic string, source string, id string, handlerName string, appendTime time.Time) error {
+	if appendTime.IsZero() {
+		appendTime = time.Unix(0, 0).UTC()
+	}
 	result, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO eventsProcessed (topic, source, id, handlerName, processedAt)
-		VALUES (?, ?, ?, ?, now())`,
-		topic, source, id, handlerName)
+		INSERT IGNORE INTO eventsProcessed
+			(topic, source, id, handlerName, processedAt, lastSeenAt)
+		VALUES
+			(?, ?, ?, ?, now(), GREATEST(?, now(6)))`,
+		topic, source, id, handlerName, appendTime.UTC())
 	if err != nil {
 		return errors.Errorf("consume could not mark event as delivered: %w", err)
 	}
@@ -358,6 +467,24 @@ func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, t
 	}
 	if rowsAffected == 0 {
 		return eventmodels.ErrAlreadyProcessed.Errorf("event (%s %s %s) is already delivered to handler (%s)", topic, source, id, handlerName)
+	}
+	return nil
+}
+
+func TouchEventProcessed(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, topic string, source string, id string, handlerName string, timestamp time.Time) error {
+	_, err := db.ExecContext(ctx, `
+		UPDATE eventsProcessed
+		SET lastSeenAt = ?
+		WHERE topic = ?
+		  AND source = ?
+		  AND id = ?
+		  AND handlerName = ?
+		  AND lastSeenAt < ?`,
+		timestamp, topic, source, id, handlerName, timestamp)
+	if err != nil {
+		return errors.Errorf("consume could not record a later copy of event (%s %s %s) for handler (%s): %w", topic, source, id, handlerName, err)
 	}
 	return nil
 }

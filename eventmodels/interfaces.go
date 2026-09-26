@@ -113,6 +113,22 @@ type AbstractDB[ID AbstractID[ID], TX AbstractTX] interface {
 	MarkEventProcessed(ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error
 }
 
+// CanMarkEventProcessedAt is implemented by databases that record a conservative
+// lastSeenAt when an exactly-once handler first accepts an event. appendTime is
+// the Kafka log-append timestamp. The stored value must be at least the later of
+// appendTime and the database time at insert. Conflicts still return
+// ErrAlreadyProcessed and must not update the existing row.
+type CanMarkEventProcessedAt[TX AbstractTX] interface {
+	MarkEventProcessedAt(ctx context.Context, tx TX, topic string, source string, id string, handlerName string, appendTime time.Time) error
+}
+
+// CanTouchEventProcessed advances lastSeenAt for an existing eventsProcessed row.
+// It runs outside the handler transaction. A missing row or an older timestamp
+// is not an error. The update must not lower lastSeenAt.
+type CanTouchEventProcessed interface {
+	TouchEventProcessed(ctx context.Context, topic string, source string, id string, handlerName string, timestamp time.Time) error
+}
+
 const ErrAlreadyProcessed errors.String = "event already processed"
 
 const TimeoutErr errors.String = "did not obtain lock before deadline"

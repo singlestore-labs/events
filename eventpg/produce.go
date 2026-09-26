@@ -36,6 +36,10 @@ func New[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]](db DB) *Connection[TX, DB] 
 
 var _ eventmodels.AbstractDB[eventmodels.StringEventID, eventdb.BasicTX] = &Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
 
+var _ eventmodels.CanMarkEventProcessedAt[eventdb.BasicTX] = Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
+
+var _ eventmodels.CanTouchEventProcessed = Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
+
 var _ eventmodels.CanAugment[eventmodels.StringEventID, eventdb.BasicTX] = &Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
 
 var _ eventdb.BasicDB[eventdb.BasicTX] = &Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
@@ -76,6 +80,14 @@ func (c *Connection[TX, DB]) ProduceDroppedTxEvents(ctx context.Context, batchSi
 
 func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
+}
+
+func (c Connection[TX, DB]) MarkEventProcessedAt(ctx context.Context, tx TX, topic string, source string, id string, handlerName string, appendTime time.Time) error {
+	return MarkEventProcessedAt[TX](ctx, tx, topic, source, id, handlerName, appendTime)
+}
+
+func (c Connection[TX, DB]) TouchEventProcessed(ctx context.Context, topic string, source string, id string, handlerName string, timestamp time.Time) error {
+	return TouchEventProcessed(ctx, c, topic, source, id, handlerName, timestamp)
 }
 
 func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.StringEventID, error) {
@@ -263,11 +275,17 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 }
 
 func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
+	return MarkEventProcessedAt[TX](ctx, tx, topic, source, id, handlerName, time.Time{})
+}
+
+func MarkEventProcessedAt[TX eventmodels.AbstractTX](ctx context.Context, tx TX, topic string, source string, id string, handlerName string, appendTime time.Time) error {
 	result, err := tx.ExecContext(ctx, `
-		INSERT INTO eventsProcessed (topic, source, id, handlerName, processedAt)
-		VALUES ($1, $2, $3, $4, now())
+		INSERT INTO eventsProcessed
+			(topic, source, id, handlerName, processedAt, lastSeenAt)
+		VALUES
+			($1, $2, $3, $4, now(), GREATEST($5, clock_timestamp()))
 		ON CONFLICT (topic, source, id, handlerName) DO NOTHING`,
-		topic, source, id, handlerName)
+		topic, source, id, handlerName, appendTime)
 	if err != nil {
 		return errors.Errorf("consume could not mark event as delivered: %w", err)
 	}
@@ -277,6 +295,24 @@ func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, t
 	}
 	if rowsAffected == 0 {
 		return eventmodels.ErrAlreadyProcessed.Errorf("event (%s %s %s) is already delivered to handler (%s)", topic, source, id, handlerName)
+	}
+	return nil
+}
+
+func TouchEventProcessed(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, topic string, source string, id string, handlerName string, timestamp time.Time) error {
+	_, err := db.ExecContext(ctx, `
+		UPDATE eventsProcessed
+		SET lastSeenAt = $5
+		WHERE topic = $1
+		  AND source = $2
+		  AND id = $3
+		  AND handlerName = $4
+		  AND lastSeenAt < $5`,
+		topic, source, id, handlerName, timestamp)
+	if err != nil {
+		return errors.Errorf("consume could not record a later copy of event (%s %s %s) for handler (%s): %w", topic, source, id, handlerName, err)
 	}
 	return nil
 }
@@ -355,10 +391,61 @@ func Migrations(database *libschema.Database) {
 				source		varchar(255)			NOT NULL,
 				id		varchar(255)			NOT NULL,
 				processedAt	timestamp with time zone,
+				lastSeenAt	timestamp with time zone	NOT NULL DEFAULT now(),
 				PRIMARY KEY	(topic, source, id, handlerName)
 			);
 
 			COMMENT ON TABLE eventsProcessed IS 'persistent data to track exactly-once consumer deliveries';
 			`),
+
+		lspostgres.Script("add-eventsProcessed-lastSeenAt", `
+			ALTER TABLE eventsProcessed
+				ADD COLUMN IF NOT EXISTS lastSeenAt timestamp with time zone;
+			`),
+
+		lspostgres.Computed[*sql.DB]("backfill-eventsProcessed-lastSeenAt", backfillEventsProcessedLastSeenAt),
+
+		lspostgres.Script("eventsProcessed-lastSeenAt-not-null", `
+			ALTER TABLE eventsProcessed
+				ALTER COLUMN lastSeenAt SET DEFAULT now(),
+				ALTER COLUMN lastSeenAt SET NOT NULL;
+			`),
+
+		lspostgres.Script("eventsProcessed-topic-lastSeenAt-index", `
+			CREATE INDEX CONCURRENTLY IF NOT EXISTS eventsProcessed_topic_lastSeenAt_idx
+				ON eventsProcessed (topic, lastSeenAt);
+			`),
 	)
+}
+
+const eventsProcessedBackfillBatch = 1000
+
+func backfillEventsProcessedLastSeenAt(ctx context.Context, db *sql.DB) error {
+	migrationTime := time.Now().UTC()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		result, err := db.ExecContext(ctx, `
+			UPDATE eventsProcessed
+			SET lastSeenAt = $1
+			WHERE ctid IN (
+				SELECT ctid FROM (
+					SELECT ctid
+					FROM eventsProcessed
+					WHERE lastSeenAt IS NULL
+					LIMIT $2
+				) AS batch
+			)`, migrationTime, eventsProcessedBackfillBatch)
+		if err != nil {
+			return errors.Errorf("backfill eventsProcessed.lastSeenAt: %w", err)
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return errors.Errorf("backfill eventsProcessed.lastSeenAt: %w", err)
+		}
+		if n == 0 {
+			return nil
+		}
+	}
 }

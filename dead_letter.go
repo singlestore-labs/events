@@ -2,7 +2,10 @@ package events
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/lestrrat-go/backoff/v2"
 	"github.com/memsql/errors"
@@ -10,6 +13,11 @@ import (
 
 	"github.com/singlestore-labs/events/eventmodels"
 )
+
+// deadLetterWriteBound is the maximum time one Kafka write of a dead-letter
+// copy may run. Processed-event trim Margin must exceed this bound plus clock
+// skew. The default margin is 6 hours.
+const deadLetterWriteBound = 2 * time.Minute
 
 const (
 	deadLetterGroupPostfix = "-dead-letter"
@@ -113,26 +121,168 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(startupCtx context.Cont
 	}
 }
 
-func (lib *Library[ID, TX, DB]) produceToDeadLetter(ctx context.Context, consumerGroup consumerGroupName, handlerName string, msg kafka.Message) {
+func (lib *Library[ID, TX, DB]) produceToDeadLetter(ctx context.Context, consumerGroup consumerGroupName, handlerName string, msg kafka.Message) error {
 	originalTopic := msg.Topic
-	msg.Topic = DeadLetterTopic(msg.Topic, consumerGroup)
+	baseTopic := lib.removePrefix(originalTopic)
+	source, id, hasIdentity := stableEventIdentity(msg)
+	if !hasIdentity {
+		lib.logf(ctx, "[events] dead-letter copy of %s has no stable ce_id and ce_source; exactly-once trim protection does not apply", originalTopic)
+	}
+	msg.Topic = lib.addPrefix(DeadLetterTopic(baseTopic, consumerGroup))
+	err := lib.writeDeadLetterCopy(ctx, baseTopic, consumerGroup, source, id, hasIdentity, func(writeCtx context.Context) error {
+		return lib.writeKafkaMessages(writeCtx, msg)
+	})
+	if err != nil {
+		return err
+	}
+	lib.logf(ctx, "[events] produced dead letter message (%s/%s) to Kafka", msg.Topic, string(msg.Key))
+	DeadLetterProduceCounts.WithLabelValues(handlerName, originalTopic).Inc()
+	return nil
+}
+
+// writeDeadLetterCopy touches exactly-once rows before and after the Kafka write.
+// A failed pre-touch does not start the write. A failed post-touch returns an
+// error so the original delivery stays unacknowledged and can be retried.
+// Another dead-letter copy after a successful write is safe.
+func (lib *Library[ID, TX, DB]) writeDeadLetterCopy(
+	ctx context.Context,
+	baseTopic string,
+	consumerGroup consumerGroupName,
+	source, id string,
+	hasIdentity bool,
+	write func(context.Context) error,
+) error {
 	b := backoffPolicy.Start(ctx)
 	var failures int
 	for {
-		err := lib.writer.WriteMessages(ctx, msg)
-		if err == nil {
-			if failures > 0 {
-				lib.logf(ctx, "[events] finally produced dead letter message (%s/%s) to Kafka after %d failure(s)", msg.Topic, string(msg.Key), failures)
-			} else {
-				lib.logf(ctx, "[events] produced dead letter message (%s/%s) to Kafka", msg.Topic, string(msg.Key))
-			}
-			DeadLetterProduceCounts.WithLabelValues(handlerName, originalTopic).Inc()
-			return
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		failures++
-		_ = lib.RecordErrorNoWait(ctx, "produceEvents", errors.Errorf("cannot produce dead letter message (%s/%s, %d failures) to Kafka: %w", msg.Topic, string(msg.Key), failures, err))
-		if !backoff.Continue(b) {
-			return
+		lib.notifyDeadLetterPhase("before-pre-touch")
+		if hasIdentity {
+			if err := lib.touchExactlyOnceHandlers(ctx, baseTopic, source, id, consumerGroup, time.Now()); err != nil {
+				failures++
+				_ = lib.RecordErrorNoWait(ctx, "produceEvents", errors.Errorf("cannot touch eventsProcessed before dead-letter copy of %s (%d failures): %w", baseTopic, failures, err))
+				if ctx.Err() != nil || !backoff.Continue(b) {
+					return err
+				}
+				continue
+			}
+		}
+		lib.notifyDeadLetterPhase("after-pre-touch")
+		writeCtx, cancel := context.WithTimeout(ctx, deadLetterWriteBound)
+		err := write(writeCtx)
+		cancel()
+		if err != nil {
+			failures++
+			_ = lib.RecordErrorNoWait(ctx, "produceEvents", errors.Errorf("cannot produce dead letter message for %s (%d failures) to Kafka: %w", baseTopic, failures, err))
+			if ctx.Err() != nil || !backoff.Continue(b) {
+				return err
+			}
+			continue
+		}
+		lib.notifyDeadLetterPhase("after-write")
+		if hasIdentity {
+			if err := lib.touchExactlyOnceHandlers(ctx, baseTopic, source, id, consumerGroup, time.Now()); err != nil {
+				failures++
+				_ = lib.RecordErrorNoWait(ctx, "produceEvents", errors.Errorf("cannot touch eventsProcessed after dead-letter copy of %s (%d failures): %w", baseTopic, failures, err))
+				if ctx.Err() != nil || !backoff.Continue(b) {
+					return err
+				}
+				continue
+			}
+		}
+		return nil
+	}
+}
+
+func (lib *LibraryNoDB) notifyDeadLetterPhase(phase string) {
+	if lib.deadLetterHook != nil {
+		lib.deadLetterHook(phase)
+	}
+}
+
+func (lib *LibraryNoDB) writeKafkaMessages(ctx context.Context, msgs ...kafka.Message) error {
+	if lib.writeMessagesForTest != nil {
+		return lib.writeMessagesForTest(ctx, msgs...)
+	}
+	if lib.writer == nil {
+		return errors.Errorf("kafka writer is not started")
+	}
+	return lib.writer.WriteMessages(ctx, msgs...)
+}
+
+func (lib *Library[ID, TX, DB]) touchExactlyOnceHandlers(ctx context.Context, baseTopic, source, id string, group consumerGroupName, ts time.Time) error {
+	names := lib.exactlyOnceHandlerNames(group, baseTopic)
+	if len(names) == 0 {
+		return nil
+	}
+	toucher, ok := any(lib.db).(eventmodels.CanTouchEventProcessed)
+	if !ok {
+		return errors.Errorf("database cannot touch eventsProcessed for topic %s", baseTopic)
+	}
+	for _, name := range names {
+		if err := toucher.TouchEventProcessed(ctx, baseTopic, source, id, name, ts); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+func (lib *Library[ID, TX, DB]) exactlyOnceHandlerNames(group consumerGroupName, baseTopic string) []string {
+	readers := lib.readers[group]
+	if readers == nil {
+		return nil
+	}
+	topicHandler := readers.topics[baseTopic]
+	if topicHandler == nil {
+		return nil
+	}
+	names := make([]string, 0, len(topicHandler.handlerNames))
+	for _, name := range topicHandler.handlerNames {
+		handler := topicHandler.handlers[name]
+		if handler.exactlyOnce && !handler.isDeadLetter {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func stableEventIdentity(msg kafka.Message) (source, id string, ok bool) {
+	var contentType string
+	for _, header := range msg.Headers {
+		switch header.Key {
+		case "ce_source":
+			if source == "" {
+				source = string(header.Value)
+			}
+		case "ce_id":
+			if id == "" {
+				id = string(header.Value)
+			}
+		case "content-type":
+			contentType = string(header.Value)
+		}
+	}
+	if source != "" && id != "" {
+		return source, id, true
+	}
+	if strings.Contains(contentType, "cloudevents+json") && len(msg.Value) > 0 {
+		var body struct {
+			Source string `json:"source"`
+			ID     string `json:"id"`
+		}
+		if err := json.Unmarshal(msg.Value, &body); err == nil {
+			if source == "" {
+				source = body.Source
+			}
+			if id == "" {
+				id = body.ID
+			}
+		}
+	}
+	if source == "" || id == "" {
+		return "", "", false
+	}
+	return source, id, true
 }

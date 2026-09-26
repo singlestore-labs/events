@@ -592,7 +592,10 @@ func (lib *Library[ID, TX, DB]) deliverOneMessage(
 					if debugConsume {
 						lib.logf(ctx, "[events] Debug: DEAD LETTER for %s / %s / %s", handler.name, msg.Topic, string(msg.Key))
 					}
-					lib.produceToDeadLetter(ctx, handler.consumerGroup, handler.name, msg)
+					if err := lib.produceToDeadLetter(ctx, handler.consumerGroup, handler.name, msg); err != nil {
+						lib.logf(ctx, "[events] dead letter copy for %s/%s was not completed; leaving the delivery unacknowledged: %+v", msg.Topic, string(msg.Key), err)
+						return
+					}
 				default:
 					lib.logf(ctx, "[events] unexpected onfailure value %d for handler %s", handler.onFailure, handler.name)
 				}
