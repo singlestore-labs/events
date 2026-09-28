@@ -173,7 +173,6 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 				ConfigValue: "LogAppendTime",
 			})
 		}
-		tc.ConfigEntries = lib.withRetentionConfig(ctx, unprefixedTopic, append([]kafka.ConfigEntry(nil), tc.ConfigEntries...))
 
 		mir = getIntConfigValue(tc, "min.insync.replicas")
 		var ctr kafka.CreateTopicsRequest
@@ -190,8 +189,8 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 				case err == nil:
 					lib.logf(ctx, "[events] %s: topic %s no error when creating", why.why, prefixedTopic)
 				case errors.Is(err, kafka.TopicAlreadyExists):
-					lib.logf(ctx, "[events] %s: topic %s already exists", why.why, prefixedTopic)
-					err = nil
+					lib.logf(ctx, "[events] %s: topic %s already exists, updating config", why.why, prefixedTopic)
+					err = alterExistingTopicConfig(ctx, client, prefixedTopic, tc.ConfigEntries)
 				default:
 					// uh, oh. Handled later
 				}
@@ -336,6 +335,41 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, unprefixed
 }
 
 var ErrTopicCreationTimeout errors.String = "event library topic creation deadline exceeded"
+
+// alterExistingTopicConfig sets every config entry on a topic that already exists.
+// Keys that are not listed are left unchanged.
+func alterExistingTopicConfig(ctx context.Context, client *kafka.Client, topic string, entries []kafka.ConfigEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	configs := make([]kafka.IncrementalAlterConfigsRequestConfig, len(entries))
+	for i, entry := range entries {
+		configs[i] = kafka.IncrementalAlterConfigsRequestConfig{
+			Name:            entry.ConfigName,
+			Value:           entry.ConfigValue,
+			ConfigOperation: kafka.ConfigOperationSet,
+		}
+	}
+	altered, err := client.IncrementalAlterConfigs(ctx, &kafka.IncrementalAlterConfigsRequest{
+		Resources: []kafka.IncrementalAlterConfigsRequestResource{{
+			ResourceType: kafka.ResourceTypeTopic,
+			ResourceName: topic,
+			Configs:      configs,
+		}},
+	})
+	if err != nil {
+		return errors.Errorf("alter topic config for %s: %w", topic, err)
+	}
+	if altered == nil {
+		return errors.Errorf("alter topic config for %s: empty response", topic)
+	}
+	for _, resource := range altered.Resources {
+		if resource.Error != nil {
+			return errors.Errorf("alter topic config for %s: %w", resource.ResourceName, resource.Error)
+		}
+	}
+	return nil
+}
 
 func getIntConfigValue(tc kafka.TopicConfig, configName string) int64 {
 	i := generic.FirstMatchIndex(tc.ConfigEntries, func(e kafka.ConfigEntry) bool { return e.ConfigName == configName })
