@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
@@ -83,24 +84,22 @@ func Migrations(database *libschema.Database, singlestore *lssinglestore.SingleS
 				source		varchar(255)			NOT NULL,
 				id		varchar(255)			NOT NULL,
 				processedAt	datetime(6),
-				lastSeenAt	datetime(6)			NOT NULL DEFAULT now(6),
 				PRIMARY KEY	(topic, source, id, handlerName),
 				SHARD KEY	(topic, source, id, handlerName)
 			)
 			COMMENT 'persistent data to track exactly-once consumer deliveries'`),
 
 		lssinglestore.Script("add-eventsProcessed-lastSeenAt", `
-			ALTER TABLE eventsProcessed ADD COLUMN lastSeenAt datetime(6) NULL`,
+			ALTER TABLE eventsProcessed ADD COLUMN lastSeenAt datetime(6) NOT NULL DEFAULT '1000-01-01 00:00:00.000000'`,
 			libschema.SkipIf(func() (bool, error) {
 				return singlestore.DoesColumnExist("eventsProcessed", "lastSeenAt")
 			}),
 		),
 
-		lssinglestore.Computed[*sql.DB]("backfill-eventsProcessed-lastSeenAt", backfillEventsProcessedLastSeenAt,
-			libschema.SkipIf(func() (bool, error) {
-				return eventsProcessedLastSeenAtBackfillDone(singlestore)
-			}),
-		),
+		lssinglestore.Script("backfill-eventsProcessed-lastSeenAt", `
+			UPDATE eventsProcessed
+			SET lastSeenAt = processedAt
+			WHERE processedAt > lastSeenAt`),
 
 		lssinglestore.Script("eventsProcessed-lastSeenAt-not-null", `
 			ALTER TABLE eventsProcessed MODIFY COLUMN lastSeenAt datetime(6) NOT NULL DEFAULT now(6)`,
@@ -118,64 +117,30 @@ func Migrations(database *libschema.Database, singlestore *lssinglestore.SingleS
 	)
 }
 
-const eventsProcessedBackfillBatch = 1000
-
-func eventsProcessedLastSeenAtBackfillDone(singlestore *lssinglestore.SingleStore) (bool, error) {
-	exists, err := singlestore.DoesColumnExist("eventsProcessed", "lastSeenAt")
-	if err != nil || !exists {
-		return false, err
-	}
-	var n int
-	err = singlestore.DB().QueryRow(`SELECT COUNT(*) FROM eventsProcessed WHERE lastSeenAt IS NULL`).Scan(&n)
-	if err != nil {
-		return false, err
-	}
-	return n == 0, nil
-}
-
+// sqsq: TODO move to libschema
 func eventsProcessedLastSeenAtNotNull(singlestore *lssinglestore.SingleStore) (bool, error) {
 	database, err := singlestore.DatabaseName()
 	if err != nil {
 		return false, err
 	}
-	var nullable string
+	var nullable, columnDefault string
 	err = singlestore.DB().QueryRow(`
-		SELECT is_nullable
+		SELECT is_nullable, IFNULL(column_default, '')
 		FROM information_schema.columns
 		WHERE table_schema = ?
 		  AND table_name = 'eventsProcessed'
-		  AND column_name = 'lastSeenAt'`, database).Scan(&nullable)
+		  AND column_name = 'lastSeenAt'`, database).Scan(&nullable, &columnDefault)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return nullable == "NO", nil
-}
-
-func backfillEventsProcessedLastSeenAt(ctx context.Context, db *sql.DB) error {
-	migrationTime := time.Now().UTC().Format("2006-01-02 15:04:05.000000")
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		result, err := db.ExecContext(ctx, `
-			UPDATE eventsProcessed
-			SET lastSeenAt = ?
-			WHERE lastSeenAt IS NULL
-			LIMIT ?`, migrationTime, eventsProcessedBackfillBatch)
-		if err != nil {
-			return errors.Errorf("backfill eventsProcessed.lastSeenAt: %w", err)
-		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return errors.Errorf("backfill eventsProcessed.lastSeenAt: %w", err)
-		}
-		if n == 0 {
-			return nil
-		}
+	if nullable != "NO" {
+		return false, nil
 	}
+	columnDefault = strings.ToLower(columnDefault)
+	return strings.Contains(columnDefault, "now") || strings.Contains(columnDefault, "current_timestamp"), nil
 }
 
 var _ eventmodels.AbstractDB[eventmodels.BinaryEventID, eventdb.BasicTX] = &Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
@@ -473,7 +438,8 @@ func MarkEventProcessedAt[TX eventmodels.AbstractTX](ctx context.Context, tx TX,
 
 func TouchEventProcessed(ctx context.Context, db interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, topic string, source string, id string, handlerName string, timestamp time.Time) error {
+}, topic string, source string, id string, handlerName string, timestamp time.Time,
+) error {
 	_, err := db.ExecContext(ctx, `
 		UPDATE eventsProcessed
 		SET lastSeenAt = ?

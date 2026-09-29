@@ -110,19 +110,16 @@ type LibraryNoDB struct {
 
 	// Per-topic limits map (separate from creatingTopic). Keys are topic names.
 
-	tracerProvider eventmodels.TracerProvider
-	tracerConfig   eventmodels.TracerConfig
-	hasDB          atomic.Bool
-	brokers        []string
-	writer         *kafka.Writer
-	readers        map[consumerGroupName]*group
-	broadcast      *group
-	startTime      time.Time
-	ready          atomic.Int32
-	topicConfig    map[string]kafka.TopicConfig // un-prefixed
-	// deadLetterHook and writeMessagesForTest are test seams. They stay nil in production.
-	deadLetterHook            func(phase string)
-	writeMessagesForTest      func(context.Context, ...kafka.Message) error
+	tracerProvider            eventmodels.TracerProvider
+	tracerConfig              eventmodels.TracerConfig
+	hasDB                     atomic.Bool
+	brokers                   []string
+	writer                    *kafka.Writer
+	readers                   map[consumerGroupName]*group
+	broadcast                 *group
+	startTime                 time.Time
+	ready                     atomic.Int32
+	topicConfig               map[string]kafka.TopicConfig  // un-prefixed
 	topicsWork                pwork.Work[string, topicsWhy] // un-prefixed in APIs
 	topicListingStarted       sync.Once
 	topicsHaveBeenListed      chan struct{}

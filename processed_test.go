@@ -102,19 +102,34 @@ func testDeadLetterLib(t *testing.T, db *touchDB) (*Library[eventmodels.BinaryEv
 	return lib, group.name()
 }
 
+func withDeadLetterWrite(t *testing.T, write func(context.Context, ...kafka.Message) error) {
+	t.Helper()
+	prev := writeDeadLetterMessages
+	t.Cleanup(func() { writeDeadLetterMessages = prev })
+	writeDeadLetterMessages = func(_ *kafka.Writer, ctx context.Context, msgs ...kafka.Message) error {
+		return write(ctx, msgs...)
+	}
+}
+
+func deadLetterMessage() kafka.Message {
+	return kafka.Message{
+		Topic: "orders",
+		Key:   []byte("k"),
+		Headers: []kafka.Header{
+			{Key: "ce_source", Value: []byte("src")},
+			{Key: "ce_id", Value: []byte("id-1")},
+		},
+	}
+}
+
 func TestDeadLetterPreTouchAdvancesExistingRow(t *testing.T) {
 	db := newTouchDB()
 	lib, group := testDeadLetterLib(t, db)
 	start := time.Now()
 	old := start.Add(-time.Hour)
-	lib.deadLetterHook = func(phase string) {
-		if phase == "before-pre-touch" {
-			db.insert("orders", "src", "id-1", "B", old)
-		}
-	}
-	err := lib.writeDeadLetterCopy(context.Background(), "orders", group, "src", "id-1", true, func(context.Context) error {
-		return nil
-	})
+	db.insert("orders", "src", "id-1", "B", old)
+	withDeadLetterWrite(t, func(context.Context, ...kafka.Message) error { return nil })
+	err := lib.produceToDeadLetter(context.Background(), group, "B", deadLetterMessage())
 	require.NoError(t, err)
 	seen, ok := db.seen("orders", "src", "id-1", "B")
 	require.True(t, ok)
@@ -126,14 +141,11 @@ func TestDeadLetterPostTouchAdvancesRowCommittedDuringWrite(t *testing.T) {
 	lib, group := testDeadLetterLib(t, db)
 	start := time.Now()
 	old := start.Add(-time.Hour)
-	lib.deadLetterHook = func(phase string) {
-		if phase == "after-pre-touch" {
-			db.insert("orders", "src", "id-1", "B", old)
-		}
-	}
-	err := lib.writeDeadLetterCopy(context.Background(), "orders", group, "src", "id-1", true, func(context.Context) error {
+	withDeadLetterWrite(t, func(context.Context, ...kafka.Message) error {
+		db.insert("orders", "src", "id-1", "B", old)
 		return nil
 	})
+	err := lib.produceToDeadLetter(context.Background(), group, "B", deadLetterMessage())
 	require.NoError(t, err)
 	seen, ok := db.seen("orders", "src", "id-1", "B")
 	require.True(t, ok)
@@ -153,10 +165,11 @@ func TestPreTouchFailureDoesNotWriteDeadLetter(t *testing.T) {
 		return nil
 	}
 	writes := 0
-	err := lib.writeDeadLetterCopy(ctx, "orders", group, "src", "id-1", true, func(context.Context) error {
+	withDeadLetterWrite(t, func(context.Context, ...kafka.Message) error {
 		writes++
 		return nil
 	})
+	err := lib.produceToDeadLetter(ctx, group, "B", deadLetterMessage())
 	require.Error(t, err)
 	require.Equal(t, 0, writes)
 }
@@ -174,10 +187,11 @@ func TestPostTouchFailurePreventsAcknowledgement(t *testing.T) {
 		return nil
 	}
 	writes := 0
-	err := lib.writeDeadLetterCopy(ctx, "orders", group, "src", "id-1", true, func(context.Context) error {
+	withDeadLetterWrite(t, func(context.Context, ...kafka.Message) error {
 		writes++
 		return nil
 	})
+	err := lib.produceToDeadLetter(ctx, group, "B", deadLetterMessage())
 	require.Error(t, err)
 	require.Equal(t, 1, writes)
 }
@@ -185,9 +199,8 @@ func TestPostTouchFailurePreventsAcknowledgement(t *testing.T) {
 func TestUnstableIdentitySkipsDeadLetterTouch(t *testing.T) {
 	db := newTouchDB()
 	lib, group := testDeadLetterLib(t, db)
-	err := lib.writeDeadLetterCopy(context.Background(), "orders", group, "", "", false, func(context.Context) error {
-		return nil
-	})
+	withDeadLetterWrite(t, func(context.Context, ...kafka.Message) error { return nil })
+	err := lib.produceToDeadLetter(context.Background(), group, "B", kafka.Message{Topic: "orders"})
 	require.NoError(t, err)
 	require.Equal(t, 0, db.touchCalls)
 }

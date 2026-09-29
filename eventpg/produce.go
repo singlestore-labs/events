@@ -391,7 +391,6 @@ func Migrations(database *libschema.Database) {
 				source		varchar(255)			NOT NULL,
 				id		varchar(255)			NOT NULL,
 				processedAt	timestamp with time zone,
-				lastSeenAt	timestamp with time zone	NOT NULL DEFAULT now(),
 				PRIMARY KEY	(topic, source, id, handlerName)
 			);
 
@@ -400,15 +399,18 @@ func Migrations(database *libschema.Database) {
 
 		lspostgres.Script("add-eventsProcessed-lastSeenAt", `
 			ALTER TABLE eventsProcessed
-				ADD COLUMN IF NOT EXISTS lastSeenAt timestamp with time zone;
+				ADD COLUMN IF NOT EXISTS lastSeenAt timestamp with time zone NOT NULL DEFAULT '1000-01-01 00:00:00+00';
 			`),
 
-		lspostgres.Computed[*sql.DB]("backfill-eventsProcessed-lastSeenAt", backfillEventsProcessedLastSeenAt),
+		lspostgres.Script("backfill-eventsProcessed-lastSeenAt", `
+			UPDATE eventsProcessed
+			SET lastSeenAt = processedAt
+			WHERE processedAt > lastSeenAt;
+			`),
 
-		lspostgres.Script("eventsProcessed-lastSeenAt-not-null", `
+		lspostgres.Script("eventsProcessed-lastSeenAt-default-now", `
 			ALTER TABLE eventsProcessed
-				ALTER COLUMN lastSeenAt SET DEFAULT now(),
-				ALTER COLUMN lastSeenAt SET NOT NULL;
+				ALTER COLUMN lastSeenAt SET DEFAULT now();
 			`),
 
 		lspostgres.Script("eventsProcessed-topic-lastSeenAt-index", `
@@ -416,36 +418,4 @@ func Migrations(database *libschema.Database) {
 				ON eventsProcessed (topic, lastSeenAt);
 			`),
 	)
-}
-
-const eventsProcessedBackfillBatch = 1000
-
-func backfillEventsProcessedLastSeenAt(ctx context.Context, db *sql.DB) error {
-	migrationTime := time.Now().UTC()
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		result, err := db.ExecContext(ctx, `
-			UPDATE eventsProcessed
-			SET lastSeenAt = $1
-			WHERE ctid IN (
-				SELECT ctid FROM (
-					SELECT ctid
-					FROM eventsProcessed
-					WHERE lastSeenAt IS NULL
-					LIMIT $2
-				) AS batch
-			)`, migrationTime, eventsProcessedBackfillBatch)
-		if err != nil {
-			return errors.Errorf("backfill eventsProcessed.lastSeenAt: %w", err)
-		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return errors.Errorf("backfill eventsProcessed.lastSeenAt: %w", err)
-		}
-		if n == 0 {
-			return nil
-		}
-	}
 }
