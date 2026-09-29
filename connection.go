@@ -257,8 +257,9 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 	lib := Library[ID, TX, DB]{
 		produceFromTable: make(chan []ID, produceFromTableBuffer),
 		LibraryNoDB: LibraryNoDB{
-			startTime: time.Now(),
-			readers:   make(map[consumerGroupName]*group),
+			startTime:         time.Now(),
+			readers:           make(map[consumerGroupName]*group),
+			topicHandlerOwner: make(map[topicHandler]ConsumerGroupName),
 			broadcast: &group{
 				topics:  make(map[string]*topicHandlers),
 				maxIdle: broadcastReaderIdleTimeout,
@@ -906,7 +907,7 @@ func (lib *LibraryNoDB) onlyOneGroupOwnsTopicHandler(group ConsumerGroupName, to
 	if owner, ok := lib.topicHandlerOwner[key]; ok && owner != group {
 		panic(errors.Alertf(
 			"handler %s on topic %s is already registered in consumer group %s",
-			handlerName, topic, group.String(),
+			handlerName, topic, owner.String(),
 		))
 	}
 	lib.topicHandlerOwner[key] = group
