@@ -283,7 +283,11 @@ func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) error {
 					continue
 				}
 				lib.logf(ctx, "[events] topic %s found in partition", unprefixedTopic)
-				lib.topicsWork.SetDone(unprefixedTopic)
+				_, ok := lib.getTopicConfig(unprefixedTopic)
+				if !ok {
+					// already created, and no custom config that possible update, mark as done
+					lib.topicsWork.SetDone(unprefixedTopic)
+				}
 			}
 			lib.logf(ctx, "[events] done listing existing topics")
 			return nil
