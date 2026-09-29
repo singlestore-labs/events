@@ -3,7 +3,6 @@ package eventmodels
 import (
 	"context"
 	"os"
-	"time"
 
 	"github.com/memsql/errors"
 	"github.com/segmentio/kafka-go"
@@ -154,9 +153,7 @@ func handleTx[E any, ID AbstractID[ID], TX AbstractTX](ctx context.Context, hand
 	errs = make([]error, len(messages))
 	metas := make([]Event[E], 0, len(messages))
 	callbackCtx := make([]context.Context, len(messages))
-	appendTimes := make([]time.Time, len(messages))
 	for i, message := range messages {
-		appendTimes[i] = message.Time
 		handlerCtx, done := lib.TracerConfig().Handle(ctx, handlerInfo.IsDeadLetter(), handlerInfo.Name(), message)
 		defer done()
 		callbackCtx[i] = handlerCtx
@@ -175,7 +172,7 @@ func handleTx[E any, ID AbstractID[ID], TX AbstractTX](ctx context.Context, hand
 	err := lib.DB().Transact(ctx, func(tx TX) error {
 		todo := make([]Event[E], 0, len(metas))
 		for i, meta := range metas {
-			err := markEventProcessed(lib.DB(), callbackCtx[meta.idx], tx, handlerInfo.BaseTopic(), meta.Source, meta.ID, handlerInfo.Name(), appendTimes[meta.idx])
+			err := markEventProcessed(lib.DB(), callbackCtx[meta.idx], tx, handlerInfo.BaseTopic(), meta.Source, meta.ID, handlerInfo.Name())
 			if err != nil {
 				if errors.Is(err, ErrAlreadyProcessed) {
 					alreadyDone[i] = true
@@ -198,13 +195,9 @@ func handleTx[E any, ID AbstractID[ID], TX AbstractTX](ctx context.Context, hand
 		if alreadyDone[i] {
 			// Touch after the handler transaction so a rollback of another message
 			// in the batch cannot undo the high-water mark.
-			ts := appendTimes[meta.idx]
-			if ts.IsZero() {
-				ts = time.Now()
-			}
-			touchErr := touchEventProcessed(ctx, lib.DB(), handlerInfo.BaseTopic(), meta.Source, meta.ID, handlerInfo.Name(), ts)
+			touchErr := touchEventProcessed(ctx, lib.DB(), handlerInfo.BaseTopic(), meta.Source, meta.ID, handlerInfo.Name())
 			if touchErr != nil {
-				errs[meta.idx] = errors.Errorf("consume could not record duplicate delivery of (%s) event (%s / %s) for handler (%s / %s): %w", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), touchErr)
+				errs[meta.idx] = errors.Errorf("consume could not update lastSeenAt for duplicate delivery of (%s) event (%s / %s) for handler (%s / %s): %w", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), touchErr)
 				lib.TracerProvider(callbackCtx[meta.idx])("[events] failed to advance lastSeenAt for duplicate (%s) event (%s / %s) handler (%s / %s): %+v", meta.Topic, meta.ID, meta.Key, handlerInfo.ConsumerGroup(), handlerInfo.Name(), touchErr)
 			}
 			continue
@@ -217,19 +210,16 @@ func handleTx[E any, ID AbstractID[ID], TX AbstractTX](ctx context.Context, hand
 	return
 }
 
-func markEventProcessed[ID AbstractID[ID], TX AbstractTX](db AbstractDB[ID, TX], ctx context.Context, tx TX, topic, source, id, handlerName string, appendTime time.Time) error {
-	if marker, ok := any(db).(CanMarkEventProcessedAt[TX]); ok {
-		return marker.MarkEventProcessedAt(ctx, tx, topic, source, id, handlerName, appendTime)
-	}
+func markEventProcessed[ID AbstractID[ID], TX AbstractTX](db AbstractDB[ID, TX], ctx context.Context, tx TX, topic, source, id, handlerName string) error {
 	return db.MarkEventProcessed(ctx, tx, topic, source, id, handlerName)
 }
 
-func touchEventProcessed(ctx context.Context, db any, topic, source, id, handlerName string, timestamp time.Time) error {
+func touchEventProcessed(ctx context.Context, db any, topic, source, id, handlerName string) error {
 	toucher, ok := db.(CanTouchEventProcessed)
 	if !ok {
 		return nil
 	}
-	return toucher.TouchEventProcessed(ctx, topic, source, id, handlerName, timestamp)
+	return toucher.TouchEventProcessed(ctx, topic, source, id, handlerName)
 }
 
 type batchHandlerTx[E any, ID AbstractID[ID], TX AbstractTX] struct {

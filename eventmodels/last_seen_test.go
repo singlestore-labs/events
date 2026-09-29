@@ -58,11 +58,7 @@ func (db *hwDB) Transact(_ context.Context, fn func(hwTx) error) error {
 	return nil
 }
 
-func (db *hwDB) MarkEventProcessed(context.Context, hwTx, string, string, string, string) error {
-	return nil
-}
-
-func (db *hwDB) MarkEventProcessedAt(_ context.Context, tx hwTx, topic, source, id, handler string, appendTime time.Time) error {
+func (db *hwDB) MarkEventProcessed(_ context.Context, tx hwTx, topic, source, id, handler string) error {
 	key := hwKey(topic, source, id, handler)
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -72,27 +68,23 @@ func (db *hwDB) MarkEventProcessedAt(_ context.Context, tx hwTx, topic, source, 
 	if _, ok := tx.pending[key]; ok {
 		return ErrAlreadyProcessed.Errorf("already")
 	}
-	seen := appendTime
-	if db.now.After(seen) {
-		seen = db.now
-	}
-	tx.pending[key] = seen
+	tx.pending[key] = db.now
 	return nil
 }
 
-func (db *hwDB) TouchEventProcessed(_ context.Context, topic, source, id, handler string, timestamp time.Time) error {
+func (db *hwDB) TouchEventProcessed(_ context.Context, topic, source, id, handler string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	db.touch = append(db.touch, timestamp)
+	db.touch = append(db.touch, db.now)
 	if db.failTouch {
 		return sql.ErrConnDone
 	}
 	key := hwKey(topic, source, id, handler)
 	current, ok := db.rows[key]
-	if !ok || !timestamp.After(current) {
+	if !ok || !db.now.After(current) {
 		return nil
 	}
-	db.rows[key] = timestamp
+	db.rows[key] = db.now
 	return nil
 }
 
@@ -149,16 +141,16 @@ func testMessage(id string, at time.Time) *kafka.Message {
 	}
 }
 
-func TestFirstDeliveryStoresAppendTime(t *testing.T) {
-	appendTime := time.Now().Add(time.Hour).UTC()
-	db := newHWDB(appendTime.Add(-time.Minute))
-	errs := handleTx(context.Background(), hwInfo{}, []*kafka.Message{testMessage("id-1", appendTime)}, hwLib{db}, func(context.Context, hwTx, []Event[payload]) error {
+func TestFirstDeliveryStoresDatabaseTime(t *testing.T) {
+	dbNow := time.Now().UTC()
+	db := newHWDB(dbNow)
+	errs := handleTx(context.Background(), hwInfo{}, []*kafka.Message{testMessage("id-1", dbNow.Add(time.Hour))}, hwLib{db}, func(context.Context, hwTx, []Event[payload]) error {
 		return nil
 	})
 	require.Empty(t, firstErr(errs))
 	seen, ok := db.seen("orders", "src", "id-1", "handler-b")
 	require.True(t, ok)
-	require.False(t, seen.Before(appendTime))
+	require.True(t, seen.Equal(dbNow))
 }
 
 func TestInsertIsNotEarlierThanDatabaseTime(t *testing.T) {
@@ -171,21 +163,29 @@ func TestInsertIsNotEarlierThanDatabaseTime(t *testing.T) {
 	require.Empty(t, firstErr(errs))
 	seen, ok := db.seen("orders", "src", "id-1", "handler-b")
 	require.True(t, ok)
-	require.False(t, seen.Before(dbNow))
+	require.True(t, seen.Equal(dbNow))
+}
+
+func TestTouchMissingRowSkips(t *testing.T) {
+	db := newHWDB(time.Now().UTC())
+	err := db.TouchEventProcessed(context.Background(), "orders", "src", "missing", "handler-b")
+	require.NoError(t, err)
+	_, ok := db.seen("orders", "src", "missing", "handler-b")
+	require.False(t, ok)
 }
 
 func TestNewerDuplicateAdvancesLastSeenAt(t *testing.T) {
 	older := time.Now().Add(-time.Hour).UTC()
-	newer := time.Now().UTC()
-	db := newHWDB(older)
+	dbNow := time.Now().UTC()
+	db := newHWDB(dbNow)
 	db.rows[hwKey("orders", "src", "id-1", "handler-b")] = older
-	errs := handleTx(context.Background(), hwInfo{}, []*kafka.Message{testMessage("id-1", newer)}, hwLib{db}, func(context.Context, hwTx, []Event[payload]) error {
+	errs := handleTx(context.Background(), hwInfo{}, []*kafka.Message{testMessage("id-1", older)}, hwLib{db}, func(context.Context, hwTx, []Event[payload]) error {
 		t.Fatal("duplicate must not call the handler")
 		return nil
 	})
 	require.Empty(t, firstErr(errs))
 	seen, _ := db.seen("orders", "src", "id-1", "handler-b")
-	require.True(t, seen.Equal(newer))
+	require.True(t, seen.Equal(dbNow))
 }
 
 func TestOlderDuplicateDoesNotLowerLastSeenAt(t *testing.T) {
@@ -203,12 +203,12 @@ func TestOlderDuplicateDoesNotLowerLastSeenAt(t *testing.T) {
 
 func TestDuplicateTouchSurvivesBatchRollback(t *testing.T) {
 	older := time.Now().Add(-time.Hour).UTC()
-	dupTime := time.Now().UTC()
-	db := newHWDB(older)
+	dbNow := time.Now().UTC()
+	db := newHWDB(dbNow)
 	db.rows[hwKey("orders", "src", "old", "handler-b")] = older
 	errs := handleTx(context.Background(), hwInfo{}, []*kafka.Message{
-		testMessage("old", dupTime),
-		testMessage("new", dupTime),
+		testMessage("old", older),
+		testMessage("new", older),
 	}, hwLib{db}, func(context.Context, hwTx, []Event[payload]) error {
 		return sql.ErrTxDone
 	})
@@ -217,34 +217,31 @@ func TestDuplicateTouchSurvivesBatchRollback(t *testing.T) {
 	_, newExists := db.seen("orders", "src", "new", "handler-b")
 	require.False(t, newExists)
 	seen, _ := db.seen("orders", "src", "old", "handler-b")
-	require.True(t, seen.Equal(dupTime))
+	require.True(t, seen.Equal(dbNow))
 }
 
-func TestDeadLetterConsumptionAdvancesToAppendTime(t *testing.T) {
+func TestDeadLetterConsumptionAdvancesToDatabaseTime(t *testing.T) {
 	older := time.Now().Add(-2 * time.Hour).UTC()
-	appendTime := time.Now().UTC()
-	db := newHWDB(older)
+	dbNow := time.Now().UTC()
+	db := newHWDB(dbNow)
 	db.rows[hwKey("orders", "src", "id-1", "handler-b")] = older
-	errs := handleTx(context.Background(), hwInfo{dead: true}, []*kafka.Message{testMessage("id-1", appendTime)}, hwLib{db}, func(context.Context, hwTx, []Event[payload]) error {
+	errs := handleTx(context.Background(), hwInfo{dead: true}, []*kafka.Message{testMessage("id-1", older)}, hwLib{db}, func(context.Context, hwTx, []Event[payload]) error {
 		return nil
 	})
 	require.Empty(t, firstErr(errs))
 	seen, _ := db.seen("orders", "src", "id-1", "handler-b")
-	require.True(t, seen.Equal(appendTime))
+	require.True(t, seen.Equal(dbNow))
 }
 
 func TestRowCommittedAfterDeadLetterUsesDatabaseTime(t *testing.T) {
-	// The Kafka append time is from the original copy. The database clock at
-	// insert is after dead-letter production, so lastSeenAt follows the database.
-	appendTime := time.Now().Add(-time.Hour).UTC()
 	dbNow := time.Now().UTC()
 	db := newHWDB(dbNow)
-	errs := handleTx(context.Background(), hwInfo{}, []*kafka.Message{testMessage("id-1", appendTime)}, hwLib{db}, func(context.Context, hwTx, []Event[payload]) error {
+	errs := handleTx(context.Background(), hwInfo{}, []*kafka.Message{testMessage("id-1", dbNow.Add(-time.Hour))}, hwLib{db}, func(context.Context, hwTx, []Event[payload]) error {
 		return nil
 	})
 	require.Empty(t, firstErr(errs))
 	seen, _ := db.seen("orders", "src", "id-1", "handler-b")
-	require.False(t, seen.Before(dbNow))
+	require.True(t, seen.Equal(dbNow))
 }
 
 func firstErr(errs []error) error {

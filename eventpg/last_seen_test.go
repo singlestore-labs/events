@@ -37,38 +37,29 @@ func TestPostgresLastSeenAt(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = tx.Rollback() }()
 
-	future := time.Now().Add(time.Hour).UTC()
-	err = eventpg.MarkEventProcessedAt(ctx, tx, "orders", "src", "future-id", "handler", future)
+	err = eventpg.TouchEventProcessed(ctx, tx, "orders", "src", "missing-id", "handler")
 	require.NoError(t, err)
-	var seen time.Time
-	err = tx.QueryRowContext(ctx, `SELECT lastSeenAt FROM eventsProcessed WHERE id = $1`, "future-id").Scan(&seen)
-	require.NoError(t, err)
-	require.False(t, seen.Before(future.Add(-time.Second)))
 
 	before := time.Now().UTC()
-	past := before.Add(-time.Hour)
-	err = eventpg.MarkEventProcessedAt(ctx, tx, "orders", "src", "past-id", "handler", past)
+	err = eventpg.MarkEventProcessed(ctx, tx, "orders", "src", "past-id", "handler")
 	require.NoError(t, err)
+	var seen time.Time
 	err = tx.QueryRowContext(ctx, `SELECT lastSeenAt FROM eventsProcessed WHERE id = $1`, "past-id").Scan(&seen)
 	require.NoError(t, err)
 	require.False(t, seen.Before(before.Add(-time.Second)))
 
-	err = eventpg.MarkEventProcessedAt(ctx, tx, "orders", "src", "past-id", "handler", time.Now())
+	err = eventpg.MarkEventProcessed(ctx, tx, "orders", "src", "past-id", "handler")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, eventmodels.ErrAlreadyProcessed))
 
-	older := seen.Add(-time.Minute)
-	err = eventpg.TouchEventProcessed(ctx, tx, "orders", "src", "past-id", "handler", older)
+	_, err = tx.ExecContext(ctx, `
+		UPDATE eventsProcessed
+		SET lastSeenAt = $1
+		WHERE id = $2`, before.Add(-time.Hour), "past-id")
 	require.NoError(t, err)
-	var afterOlder time.Time
-	err = tx.QueryRowContext(ctx, `SELECT lastSeenAt FROM eventsProcessed WHERE id = $1`, "past-id").Scan(&afterOlder)
-	require.NoError(t, err)
-	require.True(t, afterOlder.Equal(seen))
-
-	newer := seen.Add(time.Minute)
-	err = eventpg.TouchEventProcessed(ctx, tx, "orders", "src", "past-id", "handler", newer)
+	err = eventpg.TouchEventProcessed(ctx, tx, "orders", "src", "past-id", "handler")
 	require.NoError(t, err)
 	err = tx.QueryRowContext(ctx, `SELECT lastSeenAt FROM eventsProcessed WHERE id = $1`, "past-id").Scan(&seen)
 	require.NoError(t, err)
-	require.False(t, seen.Before(newer.Add(-time.Second)))
+	require.False(t, seen.Before(before.Add(-time.Second)))
 }

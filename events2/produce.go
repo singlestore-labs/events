@@ -145,8 +145,6 @@ func eventsProcessedLastSeenAtNotNull(singlestore *lssinglestore.SingleStore) (b
 
 var _ eventmodels.AbstractDB[eventmodels.BinaryEventID, eventdb.BasicTX] = &Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
 
-var _ eventmodels.CanMarkEventProcessedAt[eventdb.BasicTX] = Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
-
 var _ eventmodels.CanTouchEventProcessed = Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
 
 var _ eventmodels.CanAugment[eventmodels.BinaryEventID, eventdb.BasicTX] = &Connection[eventdb.BasicTX, eventdb.BasicDB[eventdb.BasicTX]]{}
@@ -189,12 +187,8 @@ func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
 }
 
-func (c Connection[TX, DB]) MarkEventProcessedAt(ctx context.Context, tx TX, topic string, source string, id string, handlerName string, appendTime time.Time) error {
-	return MarkEventProcessedAt[TX](ctx, tx, topic, source, id, handlerName, appendTime)
-}
-
-func (c Connection[TX, DB]) TouchEventProcessed(ctx context.Context, topic string, source string, id string, handlerName string, timestamp time.Time) error {
-	return TouchEventProcessed(ctx, c, topic, source, id, handlerName, timestamp)
+func (c Connection[TX, DB]) TouchEventProcessed(ctx context.Context, topic string, source string, id string, handlerName string) error {
+	return TouchEventProcessed(ctx, c, topic, source, id, handlerName)
 }
 
 func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
@@ -410,19 +404,12 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 }
 
 func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
-	return MarkEventProcessedAt[TX](ctx, tx, topic, source, id, handlerName, time.Time{})
-}
-
-func MarkEventProcessedAt[TX eventmodels.AbstractTX](ctx context.Context, tx TX, topic string, source string, id string, handlerName string, appendTime time.Time) error {
-	if appendTime.IsZero() {
-		appendTime = time.Unix(0, 0).UTC()
-	}
 	result, err := tx.ExecContext(ctx, `
 		INSERT IGNORE INTO eventsProcessed
 			(topic, source, id, handlerName, processedAt, lastSeenAt)
 		VALUES
-			(?, ?, ?, ?, now(), GREATEST(?, now(6)))`,
-		topic, source, id, handlerName, appendTime.UTC())
+			(?, ?, ?, ?, now(), now(6))`,
+		topic, source, id, handlerName)
 	if err != nil {
 		return errors.Errorf("consume could not mark event as delivered: %w", err)
 	}
@@ -438,18 +425,22 @@ func MarkEventProcessedAt[TX eventmodels.AbstractTX](ctx context.Context, tx TX,
 
 func TouchEventProcessed(ctx context.Context, db interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, topic string, source string, id string, handlerName string, timestamp time.Time,
+}, topic string, source string, id string, handlerName string,
 ) error {
-	_, err := db.ExecContext(ctx, `
+	result, err := db.ExecContext(ctx, `
 		UPDATE eventsProcessed
-		SET lastSeenAt = ?
+		SET lastSeenAt = now(6)
 		WHERE topic = ?
 		  AND source = ?
 		  AND id = ?
 		  AND handlerName = ?
-		  AND lastSeenAt < ?`,
-		timestamp, topic, source, id, handlerName, timestamp)
+		  AND lastSeenAt < now(6)`,
+		topic, source, id, handlerName)
 	if err != nil {
+		return errors.Errorf("consume could not record a later copy of event (%s %s %s) for handler (%s): %w", topic, source, id, handlerName, err)
+	}
+	// A missing row updates nothing. Leave it for a later insert.
+	if _, err := result.RowsAffected(); err != nil {
 		return errors.Errorf("consume could not record a later copy of event (%s %s %s) for handler (%s): %w", topic, source, id, handlerName, err)
 	}
 	return nil

@@ -49,7 +49,7 @@ func (db *touchDB) seen(topic, source, id, handler string) (time.Time, bool) {
 	return at, ok
 }
 
-func (db *touchDB) TouchEventProcessed(_ context.Context, topic, source, id, handler string, timestamp time.Time) error {
+func (db *touchDB) TouchEventProcessed(_ context.Context, topic, source, id, handler string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	db.touchCalls++
@@ -59,11 +59,12 @@ func (db *touchDB) TouchEventProcessed(_ context.Context, topic, source, id, han
 		}
 	}
 	key := touchKey(topic, source, id, handler)
+	now := time.Now()
 	current, ok := db.rows[key]
-	if !ok || !timestamp.After(current) {
+	if !ok || !now.After(current) {
 		return nil
 	}
-	db.rows[key] = timestamp
+	db.rows[key] = now
 	return nil
 }
 

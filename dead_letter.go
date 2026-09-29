@@ -167,9 +167,8 @@ func (lib *Library[ID, TX, DB]) produceToDeadLetter(ctx context.Context, consume
 		if !ok {
 			return errors.Errorf("database cannot touch eventsProcessed for topic %s", baseTopic)
 		}
-		now := time.Now()
 		for _, name := range names {
-			if err := toucher.TouchEventProcessed(ctx, baseTopic, source, id, name, now); err != nil {
+			if err := toucher.TouchEventProcessed(ctx, baseTopic, source, id, name); err != nil {
 				return err
 			}
 		}
