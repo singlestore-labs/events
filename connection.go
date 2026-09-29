@@ -116,6 +116,7 @@ type LibraryNoDB struct {
 	brokers                   []string
 	writer                    *kafka.Writer
 	readers                   map[consumerGroupName]*group
+	topicHandlerOwner         map[topicHandler]ConsumerGroupName
 	broadcast                 *group
 	startTime                 time.Time
 	ready                     atomic.Int32
@@ -187,6 +188,12 @@ const (
 type group struct {
 	topics  map[string]*topicHandlers // unprefixed topic -> handlers
 	maxIdle time.Duration             // reset reader when idle for this long
+}
+
+// topicHandler is a unique identifier for a topic and handler pair.
+type topicHandler struct {
+	topic       string
+	handlerName string
 }
 
 type topicHandlers struct {
@@ -524,6 +531,7 @@ func (lib *Library[ID, TX, DB]) ConsumeExactlyOnce(consumerGroup ConsumerGroupNa
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
 	lib.mustNotBeRunning("attempt configure event consumer in library that is already processing")
+	lib.onlyOneGroupOwnsTopicHandler(consumerGroup, handler.GetTopic(), handlerName)
 	lib.getTopicHandler(consumerGroup, handler.GetTopic()).addHandler(handlerName, onFailure, &lib.LibraryNoDB, handler, opts)
 	lib.hasTxConsumers = true
 }
@@ -891,6 +899,17 @@ func (lib *Library[ID, TX, DB]) mustNotBeRunning(message string) {
 	case isRunning, isShutdown:
 		panic(errors.Alertf("%s", message))
 	}
+}
+
+func (lib *LibraryNoDB) onlyOneGroupOwnsTopicHandler(group ConsumerGroupName, topic, handlerName string) {
+	key := topicHandler{topic: topic, handlerName: handlerName}
+	if owner, ok := lib.topicHandlerOwner[key]; ok && owner != group {
+		panic(errors.Alertf(
+			"handler %s on topic %s is already registered in consumer group %s",
+			handlerName, topic, group.String(),
+		))
+	}
+	lib.topicHandlerOwner[key] = group
 }
 
 func (lib *Library[ID, TX, DB]) InstanceID() int32 {
