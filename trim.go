@@ -21,7 +21,6 @@ const (
 	processedTrimConfigCleanupPolicy = "cleanup.policy"
 	processedTrimLogAppendTime       = "LogAppendTime"
 
-	trimSkipMissingTopic     = "missing_topic"
 	trimSkipUnreadableConfig = "unreadable_config"
 	trimSkipInvalidConfig    = "invalid_config"
 	trimSkipUnlimited        = "retention_unlimited"
@@ -41,23 +40,28 @@ type ProcessedTrimReport struct {
 // TrimProcessedEvents deletes eventsProcessed rows based on their processedAt
 // time and the effective Kafka retention window.
 //
-// For each base topic, the retention window is the largest retention.ms plus
-// the largest segment.ms across the base topic and its dead-letter topics. A
-// row is deleted only when:
+// Each Kafka topic keeps its own retention.ms and segment.ms together. The
+// base topic uses the longest of those windows across itself and its
+// dead-letter topics. A row is deleted only when:
 //
-//	processedAt < now - retention - segment - margin
+//	processedAt < now - factor*(retention + segment) - margin
 //
-// margin must be non-negative and should cover the Kafka retention check
-// interval, clock skew, and the maximum expected delay before a duplicate or
-// dead-letter copy is written. Topics with unsafe or unreadable settings are
-// reported as skipped.
-func (lib *Library[ID, TX, DB]) TrimProcessedEvents(ctx context.Context, margin time.Duration) (ProcessedTrimReport, error) {
+// factor must be positive and scales that per-topic window. margin must be
+// non-negative and should cover the Kafka retention check interval, clock
+// skew, and the maximum expected delay before a duplicate or dead-letter copy
+// is written. Topics with unsafe or unreadable settings are reported as
+// skipped. A base topic that is no longer present in Kafka, and has no
+// remaining dead-letter topic, has all of its processed rows deleted.
+func (lib *Library[ID, TX, DB]) TrimProcessedEvents(ctx context.Context, margin time.Duration, factor float64) (ProcessedTrimReport, error) {
 	report := ProcessedTrimReport{
 		Deleted: make(map[string]int),
 		Skipped: make(map[string]string),
 	}
 	if margin < 0 {
 		return report, errors.Errorf("processed event trim margin must not be negative")
+	}
+	if factor <= 0 || math.IsNaN(factor) || math.IsInf(factor, 0) {
+		return report, errors.Errorf("processed event trim factor must be positive")
 	}
 	if err := lib.start(ctx, "trim processed events"); err != nil {
 		return report, err
@@ -97,7 +101,7 @@ func (lib *Library[ID, TX, DB]) TrimProcessedEvents(ctx context.Context, margin 
 		if err := ctx.Err(); err != nil {
 			return report, err
 		}
-		cutoff, reason := processedTrimCutoff(now, margin, families[topic], partitions, configs)
+		cutoff, reason := processedTrimCutoff(now, margin, factor, families[topic], partitions, configs)
 		if reason != "" {
 			report.Skipped[topic] = reason
 			continue
@@ -214,15 +218,16 @@ func processedTrimTopicFamily(base string, partitions []kafka.Partition) []strin
 func processedTrimCutoff(
 	now time.Time,
 	margin time.Duration,
+	factor float64,
 	names []string,
 	partitions []kafka.Partition,
 	configs map[string]processedTrimTopicConfig,
 ) (time.Time, string) {
 	if len(names) == 0 {
-		return time.Time{}, trimSkipMissingTopic
+		// Nothing in Kafka can redeliver this topic, so every processed row can go.
+		return now, ""
 	}
-	var maxRetention time.Duration
-	var maxSegment time.Duration
+	var maxWindow time.Duration
 	for _, name := range names {
 		if processedTrimTopicOffline(name, partitions) {
 			return time.Time{}, trimSkipOfflinePartition
@@ -235,14 +240,15 @@ func processedTrimCutoff(
 		if reason != "" {
 			return time.Time{}, reason
 		}
-		if retention > maxRetention {
-			maxRetention = retention
-		}
-		if segment > maxSegment {
-			maxSegment = segment
+		if window := retention + segment; window > maxWindow {
+			maxWindow = window
 		}
 	}
-	return now.Add(-maxRetention - maxSegment - margin), ""
+	scaled := float64(maxWindow) * factor
+	if scaled > float64(math.MaxInt64) {
+		return time.Time{}, trimSkipInvalidConfig
+	}
+	return now.Add(-time.Duration(scaled) - margin), ""
 }
 
 func processedTrimTopicOffline(name string, partitions []kafka.Partition) bool {

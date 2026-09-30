@@ -20,23 +20,45 @@ func TestProcessedTrimCutoffUsesLongestTopicFamilyWindow(t *testing.T) {
 	}
 	configs := map[string]processedTrimTopicConfig{
 		"app.orders": {
-			values: trimConfigValues(24*time.Hour, time.Hour),
+			values: trimConfigValues(48*time.Hour, time.Hour),
 		},
 		"app.orders.workers.dead-letter": {
-			values: trimConfigValues(48*time.Hour, 2*time.Hour),
+			values: trimConfigValues(24*time.Hour, 10*time.Hour),
 		},
 	}
 
 	cutoff, reason := processedTrimCutoff(
 		now,
 		6*time.Hour,
+		1,
 		[]string{"app.orders", "app.orders.workers.dead-letter"},
 		partitions,
 		configs,
 	)
 
 	require.Empty(t, reason)
-	require.Equal(t, now.Add(-56*time.Hour), cutoff)
+	require.Equal(t, now.Add(-55*time.Hour), cutoff)
+
+	cutoff, reason = processedTrimCutoff(
+		now,
+		6*time.Hour,
+		2,
+		[]string{"app.orders", "app.orders.workers.dead-letter"},
+		partitions,
+		configs,
+	)
+
+	require.Empty(t, reason)
+	require.Equal(t, now.Add(-104*time.Hour), cutoff)
+}
+
+func TestProcessedTrimCutoffDeletesRowsWhenTopicFamilyIsGone(t *testing.T) {
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+
+	cutoff, reason := processedTrimCutoff(now, 6*time.Hour, 2, nil, nil, nil)
+
+	require.Empty(t, reason)
+	require.Equal(t, now, cutoff)
 }
 
 func TestProcessedTrimCutoffSkipsUnsafeTopics(t *testing.T) {
@@ -74,6 +96,7 @@ func TestProcessedTrimCutoffSkipsUnsafeTopics(t *testing.T) {
 			_, reason := processedTrimCutoff(
 				now,
 				time.Hour,
+				1,
 				[]string{"orders"},
 				[]kafka.Partition{partition},
 				map[string]processedTrimTopicConfig{
@@ -88,6 +111,7 @@ func TestProcessedTrimCutoffSkipsUnsafeTopics(t *testing.T) {
 	_, reason := processedTrimCutoff(
 		now,
 		time.Hour,
+		1,
 		[]string{"orders"},
 		[]kafka.Partition{partition},
 		map[string]processedTrimTopicConfig{
@@ -95,6 +119,35 @@ func TestProcessedTrimCutoffSkipsUnsafeTopics(t *testing.T) {
 		},
 	)
 	require.Equal(t, trimSkipOfflinePartition, reason)
+}
+
+func TestTrimProcessedEventsDeletesRowsWhenTopicIsGone(t *testing.T) {
+	db := &processedTrimTestDB{
+		NoDB:      &NoDB{},
+		topics:    []string{"orders"},
+		remaining: 10,
+	}
+	lib := New[eventmodels.BinaryEventID, *NoDBTx, *processedTrimTestDB]()
+	lib.Configure(db, nil, false, nil, nil, []string{"unused"})
+	lib.prefix = "app."
+	lib.processedTrimPartitions = func(context.Context) ([]kafka.Partition, error) {
+		return []kafka.Partition{{Topic: "app.other", Leader: kafka.Broker{ID: 1}}}, nil
+	}
+	lib.processedTrimConfigs = func(_ context.Context, names []string) (map[string]processedTrimTopicConfig, error) {
+		require.Empty(t, names)
+		return map[string]processedTrimTopicConfig{}, nil
+	}
+
+	before := time.Now()
+	report, err := lib.TrimProcessedEvents(context.Background(), time.Hour, 1)
+	after := time.Now()
+
+	require.NoError(t, err)
+	require.Equal(t, map[string]int{"orders": 10}, report.Deleted)
+	require.Empty(t, report.Skipped)
+	require.Len(t, db.cutoffs, 1)
+	require.False(t, db.cutoffs[0].Before(before))
+	require.False(t, db.cutoffs[0].After(after))
 }
 
 func TestTrimProcessedEventsUsesProcessedAtInBatches(t *testing.T) {
@@ -116,17 +169,17 @@ func TestTrimProcessedEventsUsesProcessedAtInBatches(t *testing.T) {
 		require.ElementsMatch(t, []string{"app.orders", "app.orders.group.dead-letter"}, names)
 		return map[string]processedTrimTopicConfig{
 			"app.orders": {
-				values: trimConfigValues(24*time.Hour, time.Hour),
+				values: trimConfigValues(48*time.Hour, time.Hour),
 			},
 			"app.orders.group.dead-letter": {
-				values: trimConfigValues(48*time.Hour, 2*time.Hour),
+				values: trimConfigValues(24*time.Hour, 10*time.Hour),
 			},
 		}, nil
 	}
 
-	before := time.Now().Add(-56 * time.Hour)
-	report, err := lib.TrimProcessedEvents(context.Background(), 6*time.Hour)
-	after := time.Now().Add(-56 * time.Hour)
+	before := time.Now().Add(-55 * time.Hour)
+	report, err := lib.TrimProcessedEvents(context.Background(), 6*time.Hour, 1)
+	after := time.Now().Add(-55 * time.Hour)
 
 	require.NoError(t, err)
 	require.Equal(t, map[string]int{"orders": 1250}, report.Deleted)
