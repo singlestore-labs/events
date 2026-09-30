@@ -111,6 +111,12 @@ type AbstractDB[ID AbstractID[ID], TX AbstractTX] interface {
 	// ErrAlreadyProcessed if the event has already been processed. The DB should not
 	// be used by MarkEventProcessed, it is a DB method for simplicity of wrapping.
 	MarkEventProcessed(ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error
+
+	// ProcessedTopics returns the distinct base topics stored in eventsProcessed.
+	ProcessedTopics(ctx context.Context) ([]string, error)
+	// TrimProcessedEvents removes at most batchSize rows for one topic whose
+	// processedAt is strictly before olderThan.
+	TrimProcessedEvents(ctx context.Context, topic string, olderThan time.Time, batchSize int) (int, error)
 }
 
 const ErrAlreadyProcessed errors.String = "event already processed"

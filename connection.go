@@ -119,7 +119,9 @@ type LibraryNoDB struct {
 	broadcast                 *group
 	startTime                 time.Time
 	ready                     atomic.Int32
-	topicConfig               map[string]kafka.TopicConfig  // un-prefixed
+	topicConfig               map[string]kafka.TopicConfig // un-prefixed
+	processedTrimPartitions   func(context.Context) ([]kafka.Partition, error)
+	processedTrimConfigs      func(context.Context, []string) (map[string]processedTrimTopicConfig, error)
 	topicsWork                pwork.Work[string, topicsWhy] // un-prefixed in APIs
 	topicListingStarted       sync.Once
 	topicsHaveBeenListed      chan struct{}

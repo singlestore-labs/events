@@ -43,6 +43,14 @@ func (*NoDB) MarkEventProcessed(_ context.Context, _ *NoDBTx, _ string, _ string
 	return errors.Alert(eventmodels.NotImplementedErr)
 }
 
+func (*NoDB) ProcessedTopics(context.Context) ([]string, error) {
+	return nil, errors.Alert(eventmodels.NotImplementedErr)
+}
+
+func (*NoDB) TrimProcessedEvents(context.Context, string, time.Time, int) (int, error) {
+	return 0, errors.Alert(eventmodels.NotImplementedErr)
+}
+
 func (*NoDB) ProduceSpecificTxEvents(_ context.Context, _ []eventmodels.BinaryEventID) (int, error) {
 	return 0, errors.Alert(eventmodels.NotImplementedErr)
 }
