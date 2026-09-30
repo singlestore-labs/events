@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	stderrors "errors"
 	"math"
 	"strconv"
 	"strings"
@@ -15,11 +16,11 @@ const (
 	processedTrimBatchSize     = 1000
 	processedTrimDescribeBatch = 20
 
-	processedTrimConfigRetentionMS   = "retention.ms"
-	processedTrimConfigSegmentMS     = "segment.ms"
-	processedTrimConfigTimestampType = "message.timestamp.type"
-	processedTrimConfigCleanupPolicy = "cleanup.policy"
-	processedTrimLogAppendTime       = "LogAppendTime"
+	topicConfigRetentionMS      = "retention.ms"
+	topicConfigSegmentMS        = "segment.ms"
+	topicConfigTimestampType    = "message.timestamp.type"
+	topicConfigCleanupPolicy    = "cleanup.policy"
+	topicTimestampLogAppendTime = "LogAppendTime"
 
 	trimSkipUnreadableConfig = "unreadable_config"
 	trimSkipInvalidConfig    = "invalid_config"
@@ -28,6 +29,10 @@ const (
 	trimSkipCleanupPolicy    = "cleanup_policy"
 	trimSkipOfflinePartition = "offline_partition"
 )
+
+// processedTrimDeleteAll is later than any processedAt. A cutoff of this value
+// removes every eventsProcessed row for a topic that is no longer in Kafka.
+var processedTrimDeleteAll = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // ProcessedTrimReport describes one TrimProcessedEvents pass. Deleted contains
 // the number of rows removed for each base topic. Skipped contains topics that
@@ -40,18 +45,14 @@ type ProcessedTrimReport struct {
 // TrimProcessedEvents deletes eventsProcessed rows based on their processedAt
 // time and the effective Kafka retention window.
 //
-// Each Kafka topic keeps its own retention.ms and segment.ms together. The
-// base topic uses the longest of those windows across itself and its
-// dead-letter topics. A row is deleted only when:
+// Each Kafka topic keeps its own retention.ms and segment.ms together. A row
+// is deleted only when:
 //
-//	processedAt < now - factor*(retention + segment) - margin
+//	processedAt < now - factor*(original + deadLetter) - margin
 //
-// factor must be positive and scales that per-topic window. margin must be
-// non-negative and should cover the Kafka retention check interval, clock
-// skew, and the maximum expected delay before a duplicate or dead-letter copy
-// is written. Topics with unsafe or unreadable settings are reported as
-// skipped. A base topic that is no longer present in Kafka, and has no
-// remaining dead-letter topic, has all of its processed rows deleted.
+// original is retention.ms + segment.ms of the base topic.
+// deadLetter is the longest retention.ms + segment.ms among that topic's dead-letter
+// topics that are still in Kafka, or zero when none exist.
 func (lib *Library[ID, TX, DB]) TrimProcessedEvents(ctx context.Context, margin time.Duration, factor float64) (ProcessedTrimReport, error) {
 	report := ProcessedTrimReport{
 		Deleted: make(map[string]int),
@@ -66,48 +67,53 @@ func (lib *Library[ID, TX, DB]) TrimProcessedEvents(ctx context.Context, margin 
 	if err := lib.start(ctx, "trim processed events"); err != nil {
 		return report, err
 	}
-	topics, err := lib.db.ProcessedTopics(ctx)
+	dbTopics, err := lib.db.ProcessedTopics(ctx)
 	if err != nil {
 		return report, errors.Errorf("list eventsProcessed topics: %w", err)
 	}
-	if len(topics) == 0 {
+	if len(dbTopics) == 0 {
 		return report, nil
 	}
-	partitions, err := lib.listProcessedTrimPartitions(ctx)
+	kafkaPartitions, err := lib.listProcessedTrimPartitions(ctx)
 	if err != nil {
 		return report, err
 	}
 
-	families := make(map[string][]string, len(topics))
-	allNames := make([]string, 0, len(topics))
-	seen := make(map[string]bool)
-	for _, topic := range topics {
-		names := processedTrimTopicFamily(lib.addPrefix(topic), partitions)
-		families[topic] = names
-		for _, name := range names {
-			if !seen[name] {
-				seen[name] = true
-				allNames = append(allNames, name)
+	// kafkaFamilies is keyed by the unprefixed eventsProcessed topic. Each value is
+	// the prefixed Kafka base topic plus any matching dead-letter topics that
+	// currently exist in Kafka.
+	kafkaFamilies := make(map[string][]string, len(dbTopics))
+	kafkaTopics := make([]string, 0, len(dbTopics))
+	seenKafkaTopics := make(map[string]bool)
+	for _, dbTopic := range dbTopics {
+		kafkaBaseTopic := lib.addPrefix(dbTopic)
+		kafkaTopicFamily := processedTrimKafkaTopicFamily(kafkaBaseTopic, kafkaPartitions)
+		kafkaFamilies[dbTopic] = kafkaTopicFamily
+		for _, kafkaTopic := range kafkaTopicFamily {
+			if !seenKafkaTopics[kafkaTopic] {
+				seenKafkaTopics[kafkaTopic] = true
+				kafkaTopics = append(kafkaTopics, kafkaTopic)
 			}
 		}
 	}
-	configs, err := lib.describeProcessedTrimConfigs(ctx, allNames)
+	kafkaConfigs, err := lib.describeProcessedTrimConfigs(ctx, kafkaTopics)
 	if err != nil {
 		return report, err
 	}
 
 	now := time.Now()
-	for _, topic := range topics {
+	for _, dbTopic := range dbTopics {
 		if err := ctx.Err(); err != nil {
 			return report, err
 		}
-		cutoff, reason := processedTrimCutoff(now, margin, factor, families[topic], partitions, configs)
+		kafkaBaseTopic := lib.addPrefix(dbTopic)
+		cutoff, reason := processedTrimCutoff(now, margin, factor, kafkaBaseTopic, kafkaFamilies[dbTopic], kafkaPartitions, kafkaConfigs)
 		if reason != "" {
-			report.Skipped[topic] = reason
+			report.Skipped[dbTopic] = reason
 			continue
 		}
-		deleted, err := lib.trimProcessedBatches(ctx, topic, cutoff)
-		report.Deleted[topic] = deleted
+		deleted, err := lib.trimProcessedBatches(ctx, dbTopic, cutoff)
+		report.Deleted[dbTopic] = deleted
 		if err != nil {
 			return report, err
 		}
@@ -121,8 +127,8 @@ type processedTrimTopicConfig struct {
 }
 
 func (lib *LibraryNoDB) listProcessedTrimPartitions(ctx context.Context) ([]kafka.Partition, error) {
-	if lib.processedTrimPartitions != nil {
-		return lib.processedTrimPartitions(ctx)
+	if lib.processedTrimKafkaPartitions != nil {
+		return lib.processedTrimKafkaPartitions(ctx)
 	}
 	var lastErr error
 	for _, broker := range lib.brokers {
@@ -144,36 +150,36 @@ func (lib *LibraryNoDB) listProcessedTrimPartitions(ctx context.Context) ([]kafk
 	return nil, errors.Errorf("list Kafka topics for processed-event trim: %w", lastErr)
 }
 
-func (lib *LibraryNoDB) describeProcessedTrimConfigs(ctx context.Context, names []string) (map[string]processedTrimTopicConfig, error) {
-	if lib.processedTrimConfigs != nil {
-		return lib.processedTrimConfigs(ctx, names)
+func (lib *LibraryNoDB) describeProcessedTrimConfigs(ctx context.Context, kafkaTopics []string) (map[string]processedTrimTopicConfig, error) {
+	if lib.processedTrimKafkaConfigs != nil {
+		return lib.processedTrimKafkaConfigs(ctx, kafkaTopics)
 	}
-	out := make(map[string]processedTrimTopicConfig, len(names))
-	if len(names) == 0 {
+	out := make(map[string]processedTrimTopicConfig, len(kafkaTopics))
+	if len(kafkaTopics) == 0 {
 		return out, nil
 	}
 	client, err := lib.getController(ctx)
 	if err != nil {
 		return nil, err
 	}
-	for start := 0; start < len(names); start += processedTrimDescribeBatch {
+	for start := 0; start < len(kafkaTopics); start += processedTrimDescribeBatch {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		end := start + processedTrimDescribeBatch
-		if end > len(names) {
-			end = len(names)
+		if end > len(kafkaTopics) {
+			end = len(kafkaTopics)
 		}
 		resources := make([]kafka.DescribeConfigRequestResource, end-start)
-		for i, name := range names[start:end] {
+		for i, kafkaTopic := range kafkaTopics[start:end] {
 			resources[i] = kafka.DescribeConfigRequestResource{
 				ResourceType: kafka.ResourceTypeTopic,
-				ResourceName: name,
+				ResourceName: kafkaTopic,
 				ConfigNames: []string{
-					processedTrimConfigRetentionMS,
-					processedTrimConfigSegmentMS,
-					processedTrimConfigTimestampType,
-					processedTrimConfigCleanupPolicy,
+					topicConfigRetentionMS,
+					topicConfigSegmentMS,
+					topicConfigTimestampType,
+					topicConfigCleanupPolicy,
 				},
 			}
 		}
@@ -198,62 +204,96 @@ func (lib *LibraryNoDB) describeProcessedTrimConfigs(ctx context.Context, names 
 	return out, nil
 }
 
-func processedTrimTopicFamily(base string, partitions []kafka.Partition) []string {
-	var names []string
-	seen := make(map[string]bool)
-	deadLetterPrefix := base + "."
-	for _, partition := range partitions {
-		name := partition.Topic
-		isDeadLetter := strings.HasPrefix(name, deadLetterPrefix) &&
-			strings.HasSuffix(name, deadLetterTopicPostfix) &&
-			len(name) > len(deadLetterPrefix)+len(deadLetterTopicPostfix)
-		if (name == base || isDeadLetter) && !seen[name] {
-			seen[name] = true
-			names = append(names, name)
+func processedTrimKafkaTopicFamily(kafkaBaseTopic string, kafkaPartitions []kafka.Partition) []string {
+	var kafkaTopics []string
+	seenKafkaTopics := make(map[string]bool)
+	deadLetterPrefix := kafkaBaseTopic + "."
+	for _, partition := range kafkaPartitions {
+		kafkaTopic := partition.Topic
+		isDeadLetter := strings.HasPrefix(kafkaTopic, deadLetterPrefix) &&
+			strings.HasSuffix(kafkaTopic, deadLetterTopicPostfix) &&
+			len(kafkaTopic) > len(deadLetterPrefix)+len(deadLetterTopicPostfix)
+		if (kafkaTopic == kafkaBaseTopic || isDeadLetter) && !seenKafkaTopics[kafkaTopic] {
+			seenKafkaTopics[kafkaTopic] = true
+			kafkaTopics = append(kafkaTopics, kafkaTopic)
 		}
 	}
-	return names
+	return kafkaTopics
 }
 
 func processedTrimCutoff(
 	now time.Time,
 	margin time.Duration,
 	factor float64,
-	names []string,
-	partitions []kafka.Partition,
-	configs map[string]processedTrimTopicConfig,
+	kafkaBaseTopic string,
+	kafkaTopicFamily []string,
+	kafkaPartitions []kafka.Partition,
+	kafkaConfigs map[string]processedTrimTopicConfig,
 ) (time.Time, string) {
-	if len(names) == 0 {
-		// Nothing in Kafka can redeliver this topic, so every processed row can go.
-		return now, ""
+	if !processedTrimKafkaFamilyContains(kafkaTopicFamily, kafkaBaseTopic) {
+		// The database topic has no matching Kafka base topic, so every processed
+		// row can go. A dead-letter topic that is still present does not keep these rows.
+		return processedTrimDeleteAll, ""
 	}
-	var maxWindow time.Duration
-	for _, name := range names {
-		if processedTrimTopicOffline(name, partitions) {
+	var originalWindow time.Duration
+	var deadLetterWindow time.Duration
+	for _, kafkaTopic := range kafkaTopicFamily {
+		if processedTrimKafkaTopicOffline(kafkaTopic, kafkaPartitions) {
 			return time.Time{}, trimSkipOfflinePartition
 		}
-		config, ok := configs[name]
-		if !ok || config.err != nil {
+		config, ok := kafkaConfigs[kafkaTopic]
+		if processedTrimKafkaTopicAbsent(config, ok) {
+			if kafkaTopic == kafkaBaseTopic {
+				return processedTrimDeleteAll, ""
+			}
+			continue
+		}
+		if config.err != nil {
 			return time.Time{}, trimSkipUnreadableConfig
 		}
 		retention, segment, reason := parseProcessedTrimConfig(config.values)
 		if reason != "" {
 			return time.Time{}, reason
 		}
-		if window := retention + segment; window > maxWindow {
-			maxWindow = window
+		window := retention + segment
+		if kafkaTopic == kafkaBaseTopic {
+			originalWindow = window
+			continue
+		}
+		if window > deadLetterWindow {
+			deadLetterWindow = window
 		}
 	}
-	scaled := float64(maxWindow) * factor
+	total := originalWindow + deadLetterWindow
+	if deadLetterWindow > 0 && total < originalWindow {
+		return time.Time{}, trimSkipInvalidConfig
+	}
+	scaled := float64(total) * factor
 	if scaled > float64(math.MaxInt64) {
 		return time.Time{}, trimSkipInvalidConfig
 	}
 	return now.Add(-time.Duration(scaled) - margin), ""
 }
 
-func processedTrimTopicOffline(name string, partitions []kafka.Partition) bool {
-	for _, partition := range partitions {
-		if partition.Topic == name && partition.Leader.ID < 0 {
+func processedTrimKafkaFamilyContains(kafkaTopicFamily []string, kafkaBaseTopic string) bool {
+	for _, kafkaTopic := range kafkaTopicFamily {
+		if kafkaTopic == kafkaBaseTopic {
+			return true
+		}
+	}
+	return false
+}
+
+func processedTrimKafkaTopicAbsent(config processedTrimTopicConfig, ok bool) bool {
+	if !ok {
+		return true
+	}
+	return stderrors.Is(config.err, kafka.UnknownTopicOrPartition)
+}
+
+func processedTrimKafkaTopicOffline(kafkaTopic string, kafkaPartitions []kafka.Partition) bool {
+	for _, partition := range kafkaPartitions {
+		if partition.Topic == kafkaTopic && partition.Leader.ID < 0 {
 			return true
 		}
 	}
@@ -261,10 +301,10 @@ func processedTrimTopicOffline(name string, partitions []kafka.Partition) bool {
 }
 
 func parseProcessedTrimConfig(values map[string]string) (time.Duration, time.Duration, string) {
-	retentionRaw := strings.TrimSpace(values[processedTrimConfigRetentionMS])
-	segmentRaw := strings.TrimSpace(values[processedTrimConfigSegmentMS])
-	timestampType := strings.TrimSpace(values[processedTrimConfigTimestampType])
-	cleanupPolicy := strings.TrimSpace(values[processedTrimConfigCleanupPolicy])
+	retentionRaw := strings.TrimSpace(values[topicConfigRetentionMS])
+	segmentRaw := strings.TrimSpace(values[topicConfigSegmentMS])
+	timestampType := strings.TrimSpace(values[topicConfigTimestampType])
+	cleanupPolicy := strings.TrimSpace(values[topicConfigCleanupPolicy])
 	if retentionRaw == "" || segmentRaw == "" || timestampType == "" || cleanupPolicy == "" {
 		return 0, 0, trimSkipInvalidConfig
 	}
@@ -280,7 +320,7 @@ func parseProcessedTrimConfig(values map[string]string) (time.Duration, time.Dur
 	if err != nil || segmentMS <= 0 || segmentMS > maxDurationMillis {
 		return 0, 0, trimSkipInvalidConfig
 	}
-	if timestampType != processedTrimLogAppendTime {
+	if timestampType != topicTimestampLogAppendTime {
 		return 0, 0, trimSkipTimestampType
 	}
 	if !processedTrimDeletes(cleanupPolicy) {
@@ -298,16 +338,16 @@ func processedTrimDeletes(policy string) bool {
 	return false
 }
 
-func (lib *Library[ID, TX, DB]) trimProcessedBatches(ctx context.Context, topic string, olderThan time.Time) (int, error) {
+func (lib *Library[ID, TX, DB]) trimProcessedBatches(ctx context.Context, dbTopic string, olderThan time.Time) (int, error) {
 	total := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
-		n, err := lib.db.TrimProcessedEvents(ctx, topic, olderThan, processedTrimBatchSize)
+		n, err := lib.db.TrimProcessedEvents(ctx, dbTopic, olderThan, processedTrimBatchSize)
 		total += n
 		if err != nil {
-			return total, errors.Errorf("trim eventsProcessed topic %s: %w", topic, err)
+			return total, errors.Errorf("trim eventsProcessed topic %s: %w", dbTopic, err)
 		}
 		if n < processedTrimBatchSize {
 			return total, nil

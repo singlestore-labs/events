@@ -110,47 +110,47 @@ type LibraryNoDB struct {
 
 	// Per-topic limits map (separate from creatingTopic). Keys are topic names.
 
-	tracerProvider            eventmodels.TracerProvider
-	tracerConfig              eventmodels.TracerConfig
-	hasDB                     atomic.Bool
-	brokers                   []string
-	writer                    *kafka.Writer
-	readers                   map[consumerGroupName]*group
-	broadcast                 *group
-	startTime                 time.Time
-	ready                     atomic.Int32
-	topicConfig               map[string]kafka.TopicConfig // un-prefixed
-	processedTrimPartitions   func(context.Context) ([]kafka.Partition, error)
-	processedTrimConfigs      func(context.Context, []string) (map[string]processedTrimTopicConfig, error)
-	topicsWork                pwork.Work[string, topicsWhy] // un-prefixed in APIs
-	topicListingStarted       sync.Once
-	topicsHaveBeenListed      chan struct{}
-	topicsListingErr          error // only valid after topicsHaveBeenListed is closed
-	mustRegisterTopics        bool
-	hasTxConsumers            bool
-	clientID                  string
-	mechanism                 sasl.Mechanism
-	lastBroadcastLock         sync.Mutex
-	lastBroadcast             time.Time
-	broadcastHeartbeat        time.Duration
-	heartbeatRandomness       float64
-	tlsConfig                 *tls.Config
-	producerRunning           atomic.Int32
-	broadcastConsumerBaseName string
-	broadcastConsumerMaxLock  uint32
-	broadcastConsumerSkipLock bool
-	doEnhance                 bool
-	ProduceSyncCount          atomic.Uint64 // used and exported for testing only
-	instanceID                int32
-	lazyProduce               bool
-	skipNotifier              bool
-	prefix                    string // prefixes all topics and consumer groups
-	consumeCtx                context.Context
-	produceCtx                context.Context
-	contextUpdate             chan struct{}
-	shutdownCtx               context.Context
-	shutdownCancel            context.CancelFunc
-	libraryDone               sync.WaitGroup
+	tracerProvider               eventmodels.TracerProvider
+	tracerConfig                 eventmodels.TracerConfig
+	hasDB                        atomic.Bool
+	brokers                      []string
+	writer                       *kafka.Writer
+	readers                      map[consumerGroupName]*group
+	broadcast                    *group
+	startTime                    time.Time
+	ready                        atomic.Int32
+	topicConfig                  map[string]kafka.TopicConfig // un-prefixed
+	processedTrimKafkaPartitions func(context.Context) ([]kafka.Partition, error)
+	processedTrimKafkaConfigs    func(context.Context, []string) (map[string]processedTrimTopicConfig, error)
+	topicsWork                   pwork.Work[string, topicsWhy] // un-prefixed in APIs
+	topicListingStarted          sync.Once
+	topicsHaveBeenListed         chan struct{}
+	topicsListingErr             error // only valid after topicsHaveBeenListed is closed
+	mustRegisterTopics           bool
+	hasTxConsumers               bool
+	clientID                     string
+	mechanism                    sasl.Mechanism
+	lastBroadcastLock            sync.Mutex
+	lastBroadcast                time.Time
+	broadcastHeartbeat           time.Duration
+	heartbeatRandomness          float64
+	tlsConfig                    *tls.Config
+	producerRunning              atomic.Int32
+	broadcastConsumerBaseName    string
+	broadcastConsumerMaxLock     uint32
+	broadcastConsumerSkipLock    bool
+	doEnhance                    bool
+	ProduceSyncCount             atomic.Uint64 // used and exported for testing only
+	instanceID                   int32
+	lazyProduce                  bool
+	skipNotifier                 bool
+	prefix                       string // prefixes all topics and consumer groups
+	consumeCtx                   context.Context
+	produceCtx                   context.Context
+	contextUpdate                chan struct{}
+	shutdownCtx                  context.Context
+	shutdownCancel               context.CancelFunc
+	libraryDone                  sync.WaitGroup
 
 	// lock must be held when....
 	//

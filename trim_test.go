@@ -12,16 +12,68 @@ import (
 	"github.com/singlestore-labs/events/eventmodels"
 )
 
-func TestProcessedTrimCutoffUsesLongestTopicFamilyWindow(t *testing.T) {
+func TestProcessedTrimCutoffAddsDeadLetterWindow(t *testing.T) {
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	partitions := []kafka.Partition{
 		{Topic: "app.orders", Leader: kafka.Broker{ID: 1}},
 		{Topic: "app.orders.workers.dead-letter", Leader: kafka.Broker{ID: 1}},
+		{Topic: "app.orders.other.dead-letter", Leader: kafka.Broker{ID: 1}},
 	}
 	configs := map[string]processedTrimTopicConfig{
 		"app.orders": {
 			values: trimConfigValues(48*time.Hour, time.Hour),
 		},
+		"app.orders.workers.dead-letter": {
+			values: trimConfigValues(24*time.Hour, 10*time.Hour),
+		},
+		"app.orders.other.dead-letter": {
+			values: trimConfigValues(time.Hour, time.Hour),
+		},
+	}
+
+	// original 49h + longest dead letter 34h + margin 6h
+	cutoff, reason := processedTrimCutoff(
+		now,
+		6*time.Hour,
+		1,
+		"app.orders",
+		[]string{"app.orders", "app.orders.workers.dead-letter", "app.orders.other.dead-letter"},
+		partitions,
+		configs,
+	)
+
+	require.Empty(t, reason)
+	require.Equal(t, now.Add(-89*time.Hour), cutoff)
+
+	cutoff, reason = processedTrimCutoff(
+		now,
+		6*time.Hour,
+		2,
+		"app.orders",
+		[]string{"app.orders", "app.orders.workers.dead-letter", "app.orders.other.dead-letter"},
+		partitions,
+		configs,
+	)
+
+	require.Empty(t, reason)
+	require.Equal(t, now.Add(-172*time.Hour), cutoff)
+}
+
+func TestProcessedTrimCutoffDeletesRowsWhenTopicFamilyIsGone(t *testing.T) {
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+
+	cutoff, reason := processedTrimCutoff(now, 6*time.Hour, 2, "app.orders", nil, nil, nil)
+
+	require.Empty(t, reason)
+	require.Equal(t, processedTrimDeleteAll, cutoff)
+}
+
+func TestProcessedTrimCutoffDeletesRowsWhenBaseTopicIsGone(t *testing.T) {
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	partitions := []kafka.Partition{
+		{Topic: "app.orders.workers.dead-letter", Leader: kafka.Broker{ID: 1}},
+	}
+	configs := map[string]processedTrimTopicConfig{
 		"app.orders.workers.dead-letter": {
 			values: trimConfigValues(24*time.Hour, 10*time.Hour),
 		},
@@ -31,34 +83,59 @@ func TestProcessedTrimCutoffUsesLongestTopicFamilyWindow(t *testing.T) {
 		now,
 		6*time.Hour,
 		1,
-		[]string{"app.orders", "app.orders.workers.dead-letter"},
+		"app.orders",
+		[]string{"app.orders.workers.dead-letter"},
 		partitions,
 		configs,
 	)
 
 	require.Empty(t, reason)
-	require.Equal(t, now.Add(-55*time.Hour), cutoff)
+	require.Equal(t, processedTrimDeleteAll, cutoff)
 
 	cutoff, reason = processedTrimCutoff(
 		now,
 		6*time.Hour,
-		2,
+		1,
+		"app.orders",
 		[]string{"app.orders", "app.orders.workers.dead-letter"},
 		partitions,
-		configs,
+		map[string]processedTrimTopicConfig{
+			"app.orders": {err: kafka.UnknownTopicOrPartition},
+			"app.orders.workers.dead-letter": {
+				values: trimConfigValues(24*time.Hour, 10*time.Hour),
+			},
+		},
 	)
 
 	require.Empty(t, reason)
-	require.Equal(t, now.Add(-104*time.Hour), cutoff)
+	require.Equal(t, processedTrimDeleteAll, cutoff)
 }
 
-func TestProcessedTrimCutoffDeletesRowsWhenTopicFamilyIsGone(t *testing.T) {
+func TestProcessedTrimCutoffIgnoresDeadLetterMissingFromKafka(t *testing.T) {
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	partitions := []kafka.Partition{
+		{Topic: "app.orders", Leader: kafka.Broker{ID: 1}},
+		{Topic: "app.orders.workers.dead-letter", Leader: kafka.Broker{ID: 1}},
+	}
 
-	cutoff, reason := processedTrimCutoff(now, 6*time.Hour, 2, nil, nil, nil)
+	// original 49h + margin 6h; the unknown dead-letter topic adds nothing
+	cutoff, reason := processedTrimCutoff(
+		now,
+		6*time.Hour,
+		1,
+		"app.orders",
+		[]string{"app.orders", "app.orders.workers.dead-letter"},
+		partitions,
+		map[string]processedTrimTopicConfig{
+			"app.orders": {
+				values: trimConfigValues(48*time.Hour, time.Hour),
+			},
+			"app.orders.workers.dead-letter": {err: kafka.UnknownTopicOrPartition},
+		},
+	)
 
 	require.Empty(t, reason)
-	require.Equal(t, now, cutoff)
+	require.Equal(t, now.Add(-55*time.Hour), cutoff)
 }
 
 func TestProcessedTrimCutoffSkipsUnsafeTopics(t *testing.T) {
@@ -72,7 +149,7 @@ func TestProcessedTrimCutoffSkipsUnsafeTopics(t *testing.T) {
 	}{
 		{
 			name:   "unlimited retention",
-			values: trimConfigValuesMS("-1", "1000", processedTrimLogAppendTime, "delete"),
+			values: trimConfigValuesMS("-1", "1000", topicTimestampLogAppendTime, "delete"),
 			reason: trimSkipUnlimited,
 		},
 		{
@@ -82,12 +159,12 @@ func TestProcessedTrimCutoffSkipsUnsafeTopics(t *testing.T) {
 		},
 		{
 			name:   "compact only",
-			values: trimConfigValuesMS("1000", "1000", processedTrimLogAppendTime, "compact"),
+			values: trimConfigValuesMS("1000", "1000", topicTimestampLogAppendTime, "compact"),
 			reason: trimSkipCleanupPolicy,
 		},
 		{
 			name:   "invalid retention",
-			values: trimConfigValuesMS("invalid", "1000", processedTrimLogAppendTime, "delete"),
+			values: trimConfigValuesMS("invalid", "1000", topicTimestampLogAppendTime, "delete"),
 			reason: trimSkipInvalidConfig,
 		},
 	}
@@ -97,6 +174,7 @@ func TestProcessedTrimCutoffSkipsUnsafeTopics(t *testing.T) {
 				now,
 				time.Hour,
 				1,
+				"orders",
 				[]string{"orders"},
 				[]kafka.Partition{partition},
 				map[string]processedTrimTopicConfig{
@@ -112,6 +190,7 @@ func TestProcessedTrimCutoffSkipsUnsafeTopics(t *testing.T) {
 		now,
 		time.Hour,
 		1,
+		"orders",
 		[]string{"orders"},
 		[]kafka.Partition{partition},
 		map[string]processedTrimTopicConfig{
@@ -124,49 +203,45 @@ func TestProcessedTrimCutoffSkipsUnsafeTopics(t *testing.T) {
 func TestTrimProcessedEventsDeletesRowsWhenTopicIsGone(t *testing.T) {
 	db := &processedTrimTestDB{
 		NoDB:      &NoDB{},
-		topics:    []string{"orders"},
+		dbTopics:  []string{"orders"},
 		remaining: 10,
 	}
 	lib := New[eventmodels.BinaryEventID, *NoDBTx, *processedTrimTestDB]()
 	lib.Configure(db, nil, false, nil, nil, []string{"unused"})
 	lib.prefix = "app."
-	lib.processedTrimPartitions = func(context.Context) ([]kafka.Partition, error) {
+	lib.processedTrimKafkaPartitions = func(context.Context) ([]kafka.Partition, error) {
 		return []kafka.Partition{{Topic: "app.other", Leader: kafka.Broker{ID: 1}}}, nil
 	}
-	lib.processedTrimConfigs = func(_ context.Context, names []string) (map[string]processedTrimTopicConfig, error) {
-		require.Empty(t, names)
+	lib.processedTrimKafkaConfigs = func(_ context.Context, kafkaTopics []string) (map[string]processedTrimTopicConfig, error) {
+		require.Empty(t, kafkaTopics)
 		return map[string]processedTrimTopicConfig{}, nil
 	}
 
-	before := time.Now()
 	report, err := lib.TrimProcessedEvents(context.Background(), time.Hour, 1)
-	after := time.Now()
 
 	require.NoError(t, err)
 	require.Equal(t, map[string]int{"orders": 10}, report.Deleted)
 	require.Empty(t, report.Skipped)
-	require.Len(t, db.cutoffs, 1)
-	require.False(t, db.cutoffs[0].Before(before))
-	require.False(t, db.cutoffs[0].After(after))
+	require.Equal(t, []time.Time{processedTrimDeleteAll}, db.cutoffs)
 }
 
 func TestTrimProcessedEventsUsesProcessedAtInBatches(t *testing.T) {
 	db := &processedTrimTestDB{
 		NoDB:      &NoDB{},
-		topics:    []string{"orders"},
+		dbTopics:  []string{"orders"},
 		remaining: 1250,
 	}
 	lib := New[eventmodels.BinaryEventID, *NoDBTx, *processedTrimTestDB]()
 	lib.Configure(db, nil, false, nil, nil, []string{"unused"})
 	lib.prefix = "app."
-	lib.processedTrimPartitions = func(context.Context) ([]kafka.Partition, error) {
+	lib.processedTrimKafkaPartitions = func(context.Context) ([]kafka.Partition, error) {
 		return []kafka.Partition{
 			{Topic: "app.orders", Leader: kafka.Broker{ID: 1}},
 			{Topic: "app.orders.group.dead-letter", Leader: kafka.Broker{ID: 1}},
 		}, nil
 	}
-	lib.processedTrimConfigs = func(_ context.Context, names []string) (map[string]processedTrimTopicConfig, error) {
-		require.ElementsMatch(t, []string{"app.orders", "app.orders.group.dead-letter"}, names)
+	lib.processedTrimKafkaConfigs = func(_ context.Context, kafkaTopics []string) (map[string]processedTrimTopicConfig, error) {
+		require.ElementsMatch(t, []string{"app.orders", "app.orders.group.dead-letter"}, kafkaTopics)
 		return map[string]processedTrimTopicConfig{
 			"app.orders": {
 				values: trimConfigValues(48*time.Hour, time.Hour),
@@ -177,9 +252,9 @@ func TestTrimProcessedEventsUsesProcessedAtInBatches(t *testing.T) {
 		}, nil
 	}
 
-	before := time.Now().Add(-55 * time.Hour)
+	before := time.Now().Add(-89 * time.Hour)
 	report, err := lib.TrimProcessedEvents(context.Background(), 6*time.Hour, 1)
-	after := time.Now().Add(-55 * time.Hour)
+	after := time.Now().Add(-89 * time.Hour)
 
 	require.NoError(t, err)
 	require.Equal(t, map[string]int{"orders": 1250}, report.Deleted)
@@ -193,14 +268,14 @@ func TestTrimProcessedEventsUsesProcessedAtInBatches(t *testing.T) {
 
 type processedTrimTestDB struct {
 	*NoDB
-	topics     []string
+	dbTopics   []string
 	remaining  int
 	cutoffs    []time.Time
 	batchSizes []int
 }
 
 func (db *processedTrimTestDB) ProcessedTopics(context.Context) ([]string, error) {
-	return db.topics, nil
+	return db.dbTopics, nil
 }
 
 func (db *processedTrimTestDB) TrimProcessedEvents(_ context.Context, _ string, olderThan time.Time, batchSize int) (int, error) {
@@ -218,17 +293,17 @@ func trimConfigValues(retention, segment time.Duration) map[string]string {
 	return trimConfigValuesMS(
 		timeDurationMilliseconds(retention),
 		timeDurationMilliseconds(segment),
-		processedTrimLogAppendTime,
+		topicTimestampLogAppendTime,
 		"delete",
 	)
 }
 
 func trimConfigValuesMS(retention, segment, timestampType, cleanupPolicy string) map[string]string {
 	return map[string]string{
-		processedTrimConfigRetentionMS:   retention,
-		processedTrimConfigSegmentMS:     segment,
-		processedTrimConfigTimestampType: timestampType,
-		processedTrimConfigCleanupPolicy: cleanupPolicy,
+		topicConfigRetentionMS:   retention,
+		topicConfigSegmentMS:     segment,
+		topicConfigTimestampType: timestampType,
+		topicConfigCleanupPolicy: cleanupPolicy,
 	}
 }
 
