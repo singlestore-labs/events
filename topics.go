@@ -53,7 +53,7 @@ const UnregisteredTopicError errors.String = "topic is not pre-registered"
 // Topics will be auto-created when a message is sent. Topics will be auto-created
 // on startup for all topics that are consumed.
 //
-// For existing topics, SetTopicConfig can be used to update the configuration of the topic.
+// For existing topics, SetTopicConfig can be used to update the ConfigEntries of the topic.
 // NOTE: removing configuration will left the configuration unchanged.
 func (lib *LibraryNoDB) SetTopicConfig(topicConfig kafka.TopicConfig) {
 	lib.lock.Lock()
@@ -155,7 +155,7 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 		}
 		tc, _ := lib.getTopicConfig(unprefixedTopic)
 		if _, exists := lib.existingTopics[unprefixedTopic]; exists {
-			lib.logf(ctx, "[events] %s: topic %s already exists, checking config", why.why, tc.Topic)
+			lib.logf(ctx, "[events] %s: topic %s already exists, checking config to update", why.why, tc.Topic)
 			return alterExistingTopicConfig(ctx, client, tc.Topic, tc.ConfigEntries)
 		}
 		// create topic
