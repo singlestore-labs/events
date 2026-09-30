@@ -52,6 +52,9 @@ const UnregisteredTopicError errors.String = "topic is not pre-registered"
 //
 // Topics will be auto-created when a message is sent. Topics will be auto-created
 // on startup for all topics that are consumed.
+//
+// For existing topics, SetTopicConfig can be used to update the configuration of the topic.
+// NOTE: removing configuration will left the configuration unchanged.
 func (lib *LibraryNoDB) SetTopicConfig(topicConfig kafka.TopicConfig) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
@@ -146,7 +149,16 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 		return nil
 	}
 	lib.topicsWork.ItemWork = func(ctx context.Context, unprefixedTopic string, why topicsWhy) error {
+		client, err := lib.getController(ctx)
+		if err != nil {
+			return err
+		}
 		tc, _ := lib.getTopicConfig(unprefixedTopic)
+		if _, exists := lib.existingTopics[unprefixedTopic]; exists {
+			lib.logf(ctx, "[events] %s: topic %s already exists, checking config", why.why, tc.Topic)
+			return alterExistingTopicConfig(ctx, client, tc.Topic, tc.ConfigEntries)
+		}
+		// create topic
 		prefixedTopic := lib.addPrefix(unprefixedTopic)
 		tc.Topic = prefixedTopic
 		if tc.NumPartitions == 0 {
@@ -178,7 +190,6 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 		var ctr kafka.CreateTopicsRequest
 		ctr.Topics = append(ctr.Topics, tc)
 		lib.logf(ctx, "[events] %s: attempting creation of topic %s with replicas %d and min.insync %d", why.why, prefixedTopic, tc.ReplicationFactor, mir)
-		client, err := lib.getController(ctx)
 		if err == nil {
 			lib.logf(ctx, "[events] %s: making topic creation request for %v", why.why, prefixedTopic)
 			var resp *kafka.CreateTopicsResponse
@@ -190,7 +201,6 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 					lib.logf(ctx, "[events] %s: topic %s no error when creating", why.why, prefixedTopic)
 				case errors.Is(err, kafka.TopicAlreadyExists):
 					lib.logf(ctx, "[events] %s: topic %s already exists, updating config", why.why, prefixedTopic)
-					err = alterExistingTopicConfig(ctx, client, prefixedTopic, tc.ConfigEntries)
 				default:
 					// uh, oh. Handled later
 				}
@@ -204,7 +214,7 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 				lib.logf(ctx, "[events] %s: topic creation request was throttled for %s", why.why, resp.Throttle)
 			}
 		}
-		return err
+		return nil
 	}
 	lib.topicsWork.ItemDone = func(ctx context.Context, unprefixedTopic string, why topicsWhy) {
 		lib.logf(ctx, "[events] %s: topic %s should now exist", why.why, unprefixedTopic)
@@ -244,7 +254,7 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 	lib.topicsWork.SpanMapItem = func(_ context.Context, topic string, why topicsWhy) map[string]string {
 		return map[string]string{
 			"action": "thread",
-			"thread": "create topic " + topic + " for " + why.why,
+			"thread": "create or update topic " + topic + " for " + why.why,
 		}
 	}
 }
@@ -270,6 +280,7 @@ func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) error {
 			}
 			lib.logf(ctx, "[events] listing existing topics...")
 			seen := make(map[string]bool)
+			found := make(map[string]struct{})
 			for _, p := range partitions {
 				if seen[p.Topic] {
 					continue
@@ -283,12 +294,15 @@ func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) error {
 					continue
 				}
 				lib.logf(ctx, "[events] topic %s found in partition", unprefixedTopic)
+				found[unprefixedTopic] = struct{}{}
 				_, ok := lib.getTopicConfig(unprefixedTopic)
 				if !ok {
 					// already created, and no custom config that possible update, mark as done
 					lib.topicsWork.SetDone(unprefixedTopic)
 				}
 			}
+			// Published before topicsHaveBeenListed is closed. Waiters synchronize on that close.
+			lib.existingTopics = found
 			lib.logf(ctx, "[events] done listing existing topics")
 			return nil
 		}
@@ -340,37 +354,65 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, unprefixed
 
 var ErrTopicCreationTimeout errors.String = "event library topic creation deadline exceeded"
 
-// alterExistingTopicConfig sets every config entry on a topic that already exists.
-// Keys that are not listed are left unchanged.
 func alterExistingTopicConfig(ctx context.Context, client *kafka.Client, topic string, entries []kafka.ConfigEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	configs := make([]kafka.IncrementalAlterConfigsRequestConfig, len(entries))
+	configNames := make([]string, len(entries))
 	for i, entry := range entries {
-		configs[i] = kafka.IncrementalAlterConfigsRequestConfig{
+		configNames[i] = entry.ConfigName
+	}
+	described, err := client.DescribeConfigs(ctx, &kafka.DescribeConfigsRequest{
+		Resources: []kafka.DescribeConfigRequestResource{{
+			ResourceType: kafka.ResourceTypeTopic,
+			ResourceName: topic,
+			ConfigNames:  configNames,
+		}},
+	})
+	if err != nil {
+		return errors.Errorf("describe topic config for %s: %w", topic, err)
+	}
+	if described == nil || len(described.Resources) != 1 {
+		return errors.Errorf("describe topic config for %s: unexpected response", topic)
+	}
+	resource := described.Resources[0]
+	if resource.Error != nil {
+		return errors.Errorf("describe topic config for %s: %w", topic, resource.Error)
+	}
+
+	current := make(map[string]string, len(resource.ConfigEntries))
+	for _, entry := range resource.ConfigEntries {
+		current[entry.ConfigName] = entry.ConfigValue
+	}
+	changed := make([]kafka.IncrementalAlterConfigsRequestConfig, 0, len(entries))
+	for _, entry := range entries {
+		if value, ok := current[entry.ConfigName]; ok && value == entry.ConfigValue {
+			continue
+		}
+		changed = append(changed, kafka.IncrementalAlterConfigsRequestConfig{
 			Name:            entry.ConfigName,
 			Value:           entry.ConfigValue,
 			ConfigOperation: kafka.ConfigOperationSet,
-		}
+		})
+	}
+	if len(changed) == 0 {
+		return nil
 	}
 	altered, err := client.IncrementalAlterConfigs(ctx, &kafka.IncrementalAlterConfigsRequest{
 		Resources: []kafka.IncrementalAlterConfigsRequestResource{{
 			ResourceType: kafka.ResourceTypeTopic,
 			ResourceName: topic,
-			Configs:      configs,
+			Configs:      changed,
 		}},
 	})
 	if err != nil {
 		return errors.Errorf("alter topic config for %s: %w", topic, err)
 	}
-	if altered == nil {
-		return errors.Errorf("alter topic config for %s: empty response", topic)
+	if altered == nil || len(altered.Resources) != 1 {
+		return errors.Errorf("alter topic config for %s: unexpected response", topic)
 	}
-	for _, resource := range altered.Resources {
-		if resource.Error != nil {
-			return errors.Errorf("alter topic config for %s: %w", resource.ResourceName, resource.Error)
-		}
+	if altered.Resources[0].Error != nil {
+		return errors.Errorf("alter topic config for %s: %w", topic, altered.Resources[0].Error)
 	}
 	return nil
 }
