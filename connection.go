@@ -116,7 +116,7 @@ type LibraryNoDB struct {
 	brokers                   []string
 	writer                    *kafka.Writer
 	readers                   map[consumerGroupName]*group
-	topicHandlerOwner         map[topicHandler]ConsumerGroupName
+	exactlyOnceHandlerOwner   map[topicHandler]ConsumerGroupName
 	broadcast                 *group
 	startTime                 time.Time
 	ready                     atomic.Int32
@@ -257,9 +257,9 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 	lib := Library[ID, TX, DB]{
 		produceFromTable: make(chan []ID, produceFromTableBuffer),
 		LibraryNoDB: LibraryNoDB{
-			startTime:         time.Now(),
-			readers:           make(map[consumerGroupName]*group),
-			topicHandlerOwner: make(map[topicHandler]ConsumerGroupName),
+			startTime:               time.Now(),
+			readers:                 make(map[consumerGroupName]*group),
+			exactlyOnceHandlerOwner: make(map[topicHandler]ConsumerGroupName),
 			broadcast: &group{
 				topics:  make(map[string]*topicHandlers),
 				maxIdle: broadcastReaderIdleTimeout,
@@ -904,13 +904,13 @@ func (lib *Library[ID, TX, DB]) mustNotBeRunning(message string) {
 
 func (lib *LibraryNoDB) onlyOneGroupOwnsTopicHandler(group ConsumerGroupName, topic, handlerName string) {
 	key := topicHandler{topic: topic, handlerName: handlerName}
-	if owner, ok := lib.topicHandlerOwner[key]; ok && owner != group {
+	if owner, ok := lib.exactlyOnceHandlerOwner[key]; ok && owner != group {
 		panic(errors.Alertf(
 			"exactly-one handler %s for topic %s is already registered in consumer group %s",
 			handlerName, topic, owner.String(),
 		))
 	}
-	lib.topicHandlerOwner[key] = group
+	lib.exactlyOnceHandlerOwner[key] = group
 }
 
 func (lib *Library[ID, TX, DB]) InstanceID() int32 {
