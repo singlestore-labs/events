@@ -906,7 +906,7 @@ func (lib *LibraryNoDB) onlyOneGroupOwnsTopicHandler(group ConsumerGroupName, to
 	key := topicHandler{topic: topic, handlerName: handlerName}
 	if owner, ok := lib.topicHandlerOwner[key]; ok && owner != group {
 		panic(errors.Alertf(
-			"handler %s on topic %s is already registered in consumer group %s",
+			"exactly-one handler %s for topic %s is already registered in consumer group %s",
 			handlerName, topic, owner.String(),
 		))
 	}
