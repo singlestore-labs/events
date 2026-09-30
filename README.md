@@ -297,3 +297,28 @@ about why this is important.
 Since the message timestamps will use the log append time, if message consumers want to know when
 the message was created, a second timestamp needs to be within the message itself. Perhaps as
 a header.
+
+## Trimming exactly-once history
+
+`TrimProcessedEvents` removes old `eventsProcessed` rows using each topic
+family's effective Kafka retention window:
+
+```go
+report, err := lib.TrimProcessedEvents(ctx, 24*time.Hour, 1)
+```
+
+The cutoff is `now - factor*(original + deadLetter) - margin`. `original` is
+`retention.ms + segment.ms` of the base topic. `deadLetter` is the longest
+`retention.ms + segment.ms` among that topic's dead-letter topics that are
+still in Kafka. The margin should cover Kafka's retention-check interval,
+clock skew, and the longest expected delay before a duplicate or dead-letter
+copy is written.
+
+A base topic that is no longer in Kafka has every `eventsProcessed` row
+deleted, including when a dead-letter topic is still present. A dead-letter
+topic that is not in Kafka adds nothing to the window. Trimming is skipped
+when a relevant topic is offline, its configuration cannot be read,
+`retention.ms` is unlimited, timestamps are not `LogAppendTime`, or
+`cleanup.policy` does not include `delete`. A duplicate with the same
+CloudEvents source and ID that is produced later than the configured margin
+is outside this guarantee and may invoke the handler again.

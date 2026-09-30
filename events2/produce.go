@@ -87,6 +87,14 @@ func Migrations(database *libschema.Database, singlestore *lssinglestore.SingleS
 				SHARD KEY	(topic, source, id, handlerName)
 			)
 			COMMENT 'persistent data to track exactly-once consumer deliveries'`),
+
+		lssinglestore.Script("create-eventsProcessed-topic-processedAt-index", `
+			CREATE INDEX eventsProcessed_topic_processedAt_idx
+			ON eventsProcessed (topic, processedAt)`,
+			libschema.SkipIf(func() (bool, error) {
+				return singlestore.TableHasIndex("eventsProcessed", "eventsProcessed_topic_processedAt_idx")
+			}),
+		),
 	)
 }
 
@@ -130,6 +138,14 @@ func (c *Connection[TX, DB]) ProduceDroppedTxEvents(ctx context.Context, batchSi
 
 func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
+}
+
+func (c Connection[TX, DB]) ProcessedTopics(ctx context.Context) ([]string, error) {
+	return ProcessedTopics(ctx, c)
+}
+
+func (c Connection[TX, DB]) TrimProcessedEvents(ctx context.Context, topic string, olderThan time.Time, batchSize int) (int, error) {
+	return TrimProcessedEvents(ctx, c, topic, olderThan, batchSize)
 }
 
 func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
@@ -360,6 +376,46 @@ func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, t
 		return eventmodels.ErrAlreadyProcessed.Errorf("event (%s %s %s) is already delivered to handler (%s)", topic, source, id, handlerName)
 	}
 	return nil
+}
+
+func ProcessedTopics(ctx context.Context, db interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT DISTINCT topic FROM eventsProcessed`)
+	if err != nil {
+		return nil, errors.Errorf("list eventsProcessed topics: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var topics []string
+	for rows.Next() {
+		var topic string
+		if err := rows.Scan(&topic); err != nil {
+			return nil, errors.Errorf("scan eventsProcessed topic: %w", err)
+		}
+		topics = append(topics, topic)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.Errorf("list eventsProcessed topics: %w", err)
+	}
+	return topics, nil
+}
+
+func TrimProcessedEvents(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, topic string, olderThan time.Time, batchSize int) (int, error) {
+	result, err := db.ExecContext(ctx, `
+		DELETE FROM eventsProcessed
+		WHERE topic = ? AND processedAt < ?
+		ORDER BY processedAt
+		LIMIT ?`, topic, olderThan, batchSize)
+	if err != nil {
+		return 0, errors.Errorf("trim eventsProcessed: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, errors.Errorf("trim eventsProcessed: %w", err)
+	}
+	return int(n), nil
 }
 
 // SaveEventsInsideTx is meant to be used inside a transaction to persist
