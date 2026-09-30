@@ -123,7 +123,8 @@ type LibraryNoDB struct {
 	topicsWork                pwork.Work[string, topicsWhy] // un-prefixed in APIs
 	topicListingStarted       sync.Once
 	topicsHaveBeenListed      chan struct{}
-	topicsListingErr          error // only valid after topicsHaveBeenListed is closed
+	topicsListingErr          error               // only valid after topicsHaveBeenListed is closed
+	existingTopics            map[string]struct{} // unprefixed; published before topicsHaveBeenListed is closed
 	mustRegisterTopics        bool
 	hasTxConsumers            bool
 	clientID                  string
@@ -264,6 +265,7 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 			doEnhance:                true,
 			instanceID:               instanceCount.Add(1),
 			topicsHaveBeenListed:     make(chan struct{}),
+			existingTopics:           make(map[string]struct{}),
 			contextUpdate:            make(chan struct{}),
 			shutdownCtx:              shutdownCtx,
 			shutdownCancel:           shutdownCancel,

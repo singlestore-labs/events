@@ -8,9 +8,90 @@ import (
 	"time"
 
 	"github.com/lestrrat-go/backoff/v2"
+	"github.com/segmentio/kafka-go"
 
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/events/internal/pwork"
 )
+
+func TestDeadLetterTopicsComeFromReaders(t *testing.T) {
+	lib := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
+	lib.readers[consumerGroupName("billing")] = &group{topics: map[string]*topicHandlers{"orders": {}}}
+	lib.readers[consumerGroupName("shipping")] = &group{topics: map[string]*topicHandlers{"orders": {}}}
+	lib.readers[consumerGroupName("eu.billing")] = &group{topics: map[string]*topicHandlers{"orders": {}}}
+	lib.existingTopics = map[string]struct{}{
+		"orders":                        {},
+		"orders.eu":                     {},
+		"orders.billing.dead-letter":    {},
+		"orders.shipping.dead-letter":   {},
+		"orders.eu.billing.dead-letter": {},
+		"other.billing.dead-letter":     {},
+	}
+
+	requireEqualTopics(t, lib.deadLetterTopics("orders"), []string{
+		"orders.billing.dead-letter",
+		"orders.eu.billing.dead-letter",
+		"orders.shipping.dead-letter",
+	})
+	requireEqualTopics(t, lib.deadLetterTopics("orders.eu"), nil)
+	requireEqualTopics(t, lib.deadLetterTopics("other"), nil)
+}
+
+func TestDeadLetterStaysOpenWhenTopicHasConfig(t *testing.T) {
+	lib := New[eventmodels.BinaryEventID, *NoDBTx, *NoDB]()
+	lib.SetTopicConfig(kafka.TopicConfig{Topic: "orders"})
+	lib.SetTopicConfig(kafka.TopicConfig{Topic: "missing"})
+	lib.readers[consumerGroupName("billing")] = &group{topics: map[string]*topicHandlers{
+		"orders":  {},
+		"missing": {},
+	}}
+	lib.readers[consumerGroupName("shipping")] = &group{topics: map[string]*topicHandlers{
+		"orders": {},
+	}}
+	lib.markListedTopicsDone(map[string]struct{}{
+		"orders":                        {},
+		"orders.billing.dead-letter":    {},
+		"orders.shipping.dead-letter":   {},
+		"orders.eu":                     {},
+		"orders.eu.billing.dead-letter": {},
+		"plain":                         {},
+		"missing.billing.dead-letter":   {},
+	})
+
+	requireTopicOpen(t, lib, "orders")
+	requireTopicOpen(t, lib, "orders.billing.dead-letter")
+	requireTopicOpen(t, lib, "orders.shipping.dead-letter")
+	requireTopicOpen(t, lib, "missing.billing.dead-letter")
+	requireTopicDone(t, lib, "orders.eu")
+	requireTopicDone(t, lib, "orders.eu.billing.dead-letter")
+	requireTopicDone(t, lib, "plain")
+}
+
+func requireTopicOpen(t *testing.T, lib *Library[eventmodels.BinaryEventID, *NoDBTx, *NoDB], topic string) {
+	t.Helper()
+	if lib.topicsWork.GetState(topic) == pwork.ItemDone {
+		t.Fatalf("topic %s was marked done", topic)
+	}
+}
+
+func requireTopicDone(t *testing.T, lib *Library[eventmodels.BinaryEventID, *NoDBTx, *NoDB], topic string) {
+	t.Helper()
+	if lib.topicsWork.GetState(topic) != pwork.ItemDone {
+		t.Fatalf("topic %s was not marked done", topic)
+	}
+}
+
+func requireEqualTopics(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("topics = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("topics = %v, want %v", got, want)
+		}
+	}
+}
 
 func TestTopicListingRetryWaitsForBackoffBeforeTryingAgain(t *testing.T) {
 	controller := &testTopicListingBackoffController{
