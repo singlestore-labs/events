@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"math/rand"
+	"sort"
 	"strconv"
 	"time"
 
@@ -54,6 +55,7 @@ const UnregisteredTopicError errors.String = "topic is not pre-registered"
 // on startup for all topics that are consumed.
 //
 // For existing topics, SetTopicConfig can be used to update the ConfigEntries of the topic.
+// The same entries are applied to every existing dead-letter topic for that topic.
 // NOTE: removing configuration will left the configuration unchanged.
 func (lib *LibraryNoDB) SetTopicConfig(topicConfig kafka.TopicConfig) {
 	lib.lock.Lock()
@@ -155,8 +157,12 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 		}
 		tc, _ := lib.getTopicConfig(unprefixedTopic)
 		if _, exists := lib.existingTopics[unprefixedTopic]; exists {
-			lib.logf(ctx, "[events] %s: topic %s already exists, checking config to update", why.why, tc.Topic)
-			return alterExistingTopicConfig(ctx, client, tc.Topic, tc.ConfigEntries)
+			prefixedTopic := lib.addPrefix(unprefixedTopic)
+			lib.logf(ctx, "[events] %s: topic %s already exists, checking config to update", why.why, prefixedTopic)
+			if err := alterExistingTopicConfig(ctx, client, prefixedTopic, tc.ConfigEntries); err != nil {
+				return err
+			}
+			return lib.updateDeadLetterTopicConfigs(ctx, client, unprefixedTopic, tc.ConfigEntries)
 		}
 		// create topic
 		prefixedTopic := lib.addPrefix(unprefixedTopic)
@@ -295,12 +301,8 @@ func (lib *LibraryNoDB) listAvailableTopics(ctx context.Context) error {
 				}
 				lib.logf(ctx, "[events] topic %s found in partition", unprefixedTopic)
 				found[unprefixedTopic] = struct{}{}
-				_, ok := lib.getTopicConfig(unprefixedTopic)
-				if !ok {
-					// already created, and no custom config that possible update, mark as done
-					lib.topicsWork.SetDone(unprefixedTopic)
-				}
 			}
+			lib.markListedTopicsDone(found)
 			// Published before topicsHaveBeenListed is closed. Waiters synchronize on that close.
 			lib.existingTopics = found
 			lib.logf(ctx, "[events] done listing existing topics")
@@ -353,6 +355,74 @@ func (lib *LibraryNoDB) CreateTopics(ctx context.Context, why string, unprefixed
 }
 
 var ErrTopicCreationTimeout errors.String = "event library topic creation deadline exceeded"
+
+func (lib *LibraryNoDB) updateDeadLetterTopicConfigs(ctx context.Context, client *kafka.Client, unprefixedTopic string, entries []kafka.ConfigEntry) error {
+	for _, deadLetter := range lib.deadLetterTopics(unprefixedTopic) {
+		prefixed := lib.addPrefix(deadLetter)
+		lib.logf(ctx, "[events] dead letter topic %s already exists, checking config to update", prefixed)
+		if err := alterExistingTopicConfig(ctx, client, prefixed, entries); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deadLetterTopics returns existing dead-letter topics for unprefixedTopic
+// built from registered consumer groups. Only topics already in the cluster
+// are returned.
+func (lib *LibraryNoDB) deadLetterTopics(unprefixedTopic string) []string {
+	names := make([]string, 0)
+	for _, name := range lib.registeredDeadLetterTopics(unprefixedTopic) {
+		if _, exists := lib.existingTopics[name]; exists {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (lib *LibraryNoDB) registeredDeadLetterTopics(unprefixedTopic string) []string {
+	names := make([]string, 0)
+	for consumerGroup, group := range lib.readers {
+		if _, ok := group.topics[unprefixedTopic]; !ok {
+			continue
+		}
+		names = append(names, DeadLetterTopic(unprefixedTopic, consumerGroup))
+	}
+	return names
+}
+
+// markListedTopicsDone marks existing topics that have no configuration to
+// apply. A dead-letter topic built from a registered consumer group stays
+// open when its original topic stays open.
+func (lib *LibraryNoDB) markListedTopicsDone(found map[string]struct{}) {
+	configured := lib.configuredTopicNames()
+	keepOpen := make(map[string]struct{})
+	for topic := range configured {
+		for _, deadLetter := range lib.registeredDeadLetterTopics(topic) {
+			keepOpen[deadLetter] = struct{}{}
+		}
+	}
+	for topic := range found {
+		if _, ok := configured[topic]; ok {
+			continue
+		}
+		if _, ok := keepOpen[topic]; ok {
+			continue
+		}
+		lib.topicsWork.SetDone(topic)
+	}
+}
+
+func (lib *LibraryNoDB) configuredTopicNames() map[string]struct{} {
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	names := make(map[string]struct{}, len(lib.topicConfig))
+	for name := range lib.topicConfig {
+		names[name] = struct{}{}
+	}
+	return names
+}
 
 func alterExistingTopicConfig(ctx context.Context, client *kafka.Client, topic string, entries []kafka.ConfigEntry) error {
 	if len(entries) == 0 {
