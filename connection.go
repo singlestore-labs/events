@@ -145,6 +145,7 @@ type LibraryNoDB struct {
 	prefix                    string // prefixes all topics and consumer groups
 	consumeCtx                context.Context
 	produceCtx                context.Context
+	syncConfigCtx             context.Context
 	contextUpdate             chan struct{}
 	shutdownCtx               context.Context
 	shutdownCancel            context.CancelFunc
@@ -470,6 +471,7 @@ func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
 	defer spanDone()
 	consumeNotCancelled := false
 	produceNotCancelled := false
+	syncConfigNotCancelled := false
 	func() {
 		lib.lock.Lock()
 		defer lib.lock.Unlock()
@@ -484,12 +486,18 @@ func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
 		if lib.produceCtx != nil && lib.produceCtx.Err() == nil {
 			produceNotCancelled = true
 		}
+		if lib.syncConfigCtx != nil && lib.syncConfigCtx.Err() == nil {
+			syncConfigNotCancelled = true
+		}
 	}()
 	if consumeNotCancelled {
 		lib.tracerProvider(ctx)("[events] Shutdown called when the consume context has not been cancelled")
 	}
 	if produceNotCancelled {
 		lib.tracerProvider(ctx)("[events] Shutdown called when the catch up producer context has not been cancelled")
+	}
+	if syncConfigNotCancelled {
+		lib.tracerProvider(ctx)("[events] Shutdown called when the sync config context has not been cancelled")
 	}
 	lib.libraryDone.Wait()
 }
@@ -1057,12 +1065,15 @@ func (lib *LibraryNoDB) threadContextOld(backupCtx context.Context, spanMap map[
 func (lib *LibraryNoDB) contextsToWaitFor() ([]context.Context, <-chan struct{}) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
-	waitFor := make([]context.Context, 0, 2)
+	waitFor := make([]context.Context, 0, 3)
 	if lib.consumeCtx != nil {
 		waitFor = append(waitFor, lib.consumeCtx)
 	}
 	if lib.produceCtx != nil {
 		waitFor = append(waitFor, lib.produceCtx)
+	}
+	if lib.syncConfigCtx != nil {
+		waitFor = append(waitFor, lib.syncConfigCtx)
 	}
 	return waitFor, lib.contextUpdate
 }
