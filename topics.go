@@ -10,6 +10,7 @@ import (
 	"github.com/memsql/errors"
 	"github.com/segmentio/kafka-go"
 
+	"github.com/singlestore-labs/events/eventmodels"
 	"github.com/singlestore-labs/events/internal/pwork"
 	"github.com/singlestore-labs/generic"
 )
@@ -68,38 +69,101 @@ func (lib *LibraryNoDB) getTopicConfig(unprefixedTopic string) (kafka.TopicConfi
 	return c, ok
 }
 
-// updateTopicConfig is used to update the topic config for an existing topic.
+// UpdateTopicConfig is used to update the topic config for an existing topic.
 // it pulls the config from kafka then compares it to the desired config and applies the changes.
-func (lib *LibraryNoDB) updateTopicConfig() {
+func (lib *LibraryNoDB) UpdateTopicConfig(ctx context.Context) (err error) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
-	// sqsq run background
-	// with signal if it's running, if running trim should wait
-	// if running trigger multiple times should ignored (since no dynamic changes).
+	lib.libraryDone.Add(1)
+	go func() {
+		defer lib.libraryDone.Done()
+		lib.syncConfigProcess <- struct{}{}
+		defer func() {
+			<-lib.syncConfigProcess
+		}()
+		updateTopicList := make([]string, len(lib.topicConfig))
+		for t := range lib.topicConfig {
+			updateTopicList = append(updateTopicList, t)
+		}
+		err = lib.createTopics(ctx, updateTopicList)
+		if err != nil {
+			return
+		}
+		err = lib.syncTopicConfigFromKafka(ctx, updateTopicList)
+	}()
+	return err
 }
 
-// syncTopicConfigFromKafka is used to sync the topic config from kafka to the library.
-func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context) error {
+func (lib *LibraryNoDB) getOrDefaultConfig(unprefixedTopic string) kafka.TopicConfig {
+	tc, _ := lib.getTopicConfig(unprefixedTopic)
+	prefixedTopic := lib.addPrefix(unprefixedTopic)
+	tc.Topic = prefixedTopic
+	if tc.NumPartitions == 0 {
+		tc.NumPartitions = defaultNumPartitions
+	}
+	if tc.ReplicationFactor == 0 {
+		tc.ReplicationFactor = defaultReplicationFactor
+	}
+	if tc.ReplicationFactor > len(lib.brokers) {
+		tc.ReplicationFactor = len(lib.brokers)
+	}
+	mir := getIntConfigValue(tc, "min.insync.replicas")
+	if mir <= 0 || mir >= int64(tc.ReplicationFactor) {
+		mir = int64(tc.ReplicationFactor) - 1
+		if mir == 0 {
+			mir = 1
+		}
+		tc.ConfigEntries = setIntConfigValue(tc, "min.insync.replicas", mir)
+	}
+	tsti := generic.FirstMatchIndex(tc.ConfigEntries, func(e kafka.ConfigEntry) bool { return e.ConfigName == "message.timestamp.type" })
+	if tsti < 0 {
+		tc.ConfigEntries = append(tc.ConfigEntries, kafka.ConfigEntry{
+			ConfigName:  "message.timestamp.type",
+			ConfigValue: "LogAppendTime",
+		})
+	}
+	return tc
+}
+
+func (lib *LibraryNoDB) createTopics(ctx context.Context, topics []string) error {
 	client, err := lib.getController(ctx)
 	if err != nil {
 		return errors.Errorf("event library could not get kafka controller: %w", err)
 	}
 
-	allTopics := make(map[string]struct{}, 0)
-	for _, group := range lib.readers {
-		for topic := range group.topics {
-			prefixedTopic := lib.addPrefix(topic)
-			if _, ok := allTopics[prefixedTopic]; !ok {
-				allTopics[prefixedTopic] = struct{}{}
-			}
-		}
+	topicConfigs := make([]kafka.TopicConfig, len(topics))
+	for _, t := range topics {
+		topicConfigs = append(topicConfigs, lib.getOrDefaultConfig(t))
 	}
 
-	reqResources := make([]kafka.DescribeConfigRequestResource, len(allTopics))
-	for t := range allTopics {
+	resp, err := client.CreateTopics(ctx, &kafka.CreateTopicsRequest{
+		Topics: topicConfigs,
+	})
+	if err != nil {
+		return errors.Errorf("could not create topics %v: %w", topics, err)
+	}
+	respErrors := make([]error, 0)
+	for t, e := range resp.Errors {
+		if e != nil && errors.Is(e, kafka.TopicAlreadyExists) {
+			lib.logf(ctx, "[events] received error when creating topic %s", t)
+			respErrors = append(respErrors, errors.Errorf("failed on create topic-%s: %w", t, e))
+		}
+	}
+	return errors.Join(respErrors...)
+}
+
+// syncTopicConfigFromKafka is used to sync the topic config from kafka to the library.
+func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context, unprefixedTopics []string) error {
+	client, err := lib.getController(ctx)
+	if err != nil {
+		return errors.Errorf("event library could not get kafka controller: %w", err)
+	}
+
+	reqResources := make([]kafka.DescribeConfigRequestResource, len(unprefixedTopics))
+	for _, t := range unprefixedTopics {
 		reqResources = append(reqResources, kafka.DescribeConfigRequestResource{
 			ResourceType: kafka.ResourceTypeTopic,
-			ResourceName: t,
+			ResourceName: lib.addPrefix(t),
 		})
 	}
 
@@ -176,6 +240,39 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(rsp *kafka.DescribeConfigsRe
 		lib.topicConfig[unprefixedTopicName] = existTopicConfig
 	}
 	return incReqResources
+}
+
+func (lib *LibraryNoDB) TrimDB(ctx context.Context, margin time.Duration) error {
+	exactlyOneTopics := func() []string {
+		lib.lock.Lock()
+		defer lib.lock.Unlock()
+		seen := make(map[string]struct{})
+		topics := make([]string, 0)
+		for _, group := range lib.readers {
+			for topic, topicHandler := range group.topics {
+				if _, ok := seen[topic]; ok {
+					continue
+				}
+				for _, handler := range topicHandler.handlers {
+					if _, ok := handler.handler.(eventmodels.HandlerTxInterface[ID, TX]); ok {
+						seen[topic] = struct{}{}
+						topics = append(topics, topic)
+						break
+					}
+				}
+			}
+		}
+		return topics
+	}()
+
+	err := lib.createTopics(ctx, exactlyOneTopics)
+	if err != nil {
+		return err
+	}
+
+	// pull the kafka config (only pull don't update, could abstract with the descibe func in the update )
+
+	// trim based on the kafka config (retention time, segment time , margin)
 }
 
 // ValidateTopics will be fast whenever it can be fast. Sometimes it will
@@ -256,57 +353,31 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 		return nil
 	}
 	lib.topicsWork.ItemWork = func(ctx context.Context, unprefixedTopic string, why topicsWhy) error {
-		tc, _ := lib.getTopicConfig(unprefixedTopic)
-		prefixedTopic := lib.addPrefix(unprefixedTopic)
-		tc.Topic = prefixedTopic
-		if tc.NumPartitions == 0 {
-			tc.NumPartitions = defaultNumPartitions
-		}
-		if tc.ReplicationFactor == 0 {
-			tc.ReplicationFactor = defaultReplicationFactor
-		}
-		if tc.ReplicationFactor > len(lib.brokers) {
-			tc.ReplicationFactor = len(lib.brokers)
-		}
+		tc := lib.getOrDefaultConfig(unprefixedTopic)
 		mir := getIntConfigValue(tc, "min.insync.replicas")
-		if mir <= 0 || mir >= int64(tc.ReplicationFactor) {
-			mir = int64(tc.ReplicationFactor) - 1
-			if mir == 0 {
-				mir = 1
-			}
-			tc.ConfigEntries = setIntConfigValue(tc, "min.insync.replicas", mir)
-		}
-		tsti := generic.FirstMatchIndex(tc.ConfigEntries, func(e kafka.ConfigEntry) bool { return e.ConfigName == "message.timestamp.type" })
-		if tsti < 0 {
-			tc.ConfigEntries = append(tc.ConfigEntries, kafka.ConfigEntry{
-				ConfigName:  "message.timestamp.type",
-				ConfigValue: "LogAppendTime",
-			})
-		}
 
-		mir = getIntConfigValue(tc, "min.insync.replicas")
 		var ctr kafka.CreateTopicsRequest
 		ctr.Topics = append(ctr.Topics, tc)
-		lib.logf(ctx, "[events] %s: attempting creation of topic %s with replicas %d and min.insync %d", why.why, prefixedTopic, tc.ReplicationFactor, mir)
+		lib.logf(ctx, "[events] %s: attempting creation of topic %s with replicas %d and min.insync %d", why.why, tc.Topic, tc.ReplicationFactor, mir)
 		client, err := lib.getController(ctx)
 		if err == nil {
-			lib.logf(ctx, "[events] %s: making topic creation request for %v", why.why, prefixedTopic)
+			lib.logf(ctx, "[events] %s: making topic creation request for %v", why.why, tc.Topic)
 			var resp *kafka.CreateTopicsResponse
 			resp, err = client.CreateTopics(ctx, &ctr)
 			if err == nil {
-				err = resp.Errors[prefixedTopic]
+				err = resp.Errors[tc.Topic]
 				switch {
 				case err == nil:
-					lib.logf(ctx, "[events] %s: topic %s no error when creating", why.why, prefixedTopic)
+					lib.logf(ctx, "[events] %s: topic %s no error when creating", why.why, tc.Topic)
 				case errors.Is(err, kafka.TopicAlreadyExists):
-					lib.logf(ctx, "[events] %s: topic %s already exists", why.why, prefixedTopic)
+					lib.logf(ctx, "[events] %s: topic %s already exists", why.why, tc.Topic)
 					err = nil
 				default:
 					// uh, oh. Handled later
 				}
 				for tpc, topicErr := range resp.Errors {
-					if tpc != prefixedTopic {
-						lib.logf(ctx, "[event] received create topic response for topic (%s) not in request (%s %s): %s", tpc, why.why, prefixedTopic, topicErr)
+					if tpc != tc.Topic {
+						lib.logf(ctx, "[event] received create topic response for topic (%s) not in request (%s %s): %s", tpc, why.why, tc.Topic, topicErr)
 					}
 				}
 			}
@@ -318,15 +389,6 @@ func (lib *LibraryNoDB) configureTopicsPrework() {
 	}
 	lib.topicsWork.ItemDone = func(ctx context.Context, unprefixedTopic string, why topicsWhy) {
 		lib.logf(ctx, "[events] %s: topic %s should now exist", why.why, unprefixedTopic)
-		lib.logf(ctx, "[events] %s: topic %s start sync config", why.why, unprefixedTopic)
-		go func() {
-			syncCtx, done := lib.threadContext(lib.shutdownCtx, map[string]string{
-				"action": "thread",
-				"thread": "sync topic config " + unprefixedTopic,
-			})
-			defer done()
-			_ = lib.syncTopicConfigFromKafka(syncCtx)
-		}()
 	}
 	lib.topicsWork.ItemFailed = func(ctx context.Context, unprefixedTopic string, why topicsWhy, err error, primary bool) error {
 		err = errors.Errorf("event library error creating topic (%s) (%s): %w", unprefixedTopic, why.why, err)

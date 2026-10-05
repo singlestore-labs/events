@@ -145,7 +145,7 @@ type LibraryNoDB struct {
 	prefix                    string // prefixes all topics and consumer groups
 	consumeCtx                context.Context
 	produceCtx                context.Context
-	syncConfigCtx             context.Context
+	syncConfigProcess         chan struct{}
 	contextUpdate             chan struct{}
 	shutdownCtx               context.Context
 	shutdownCancel            context.CancelFunc
@@ -268,6 +268,7 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 			contextUpdate:            make(chan struct{}),
 			shutdownCtx:              shutdownCtx,
 			shutdownCancel:           shutdownCancel,
+			syncConfigProcess:        make(chan struct{}, 1),
 			sizeCapBrokerReady:       make(chan struct{}),
 			sizeCapDefaultAssumed:    1_000_000,
 			tracerProvider:           func(context.Context) eventmodels.Tracer { return log.Printf },
@@ -471,7 +472,6 @@ func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
 	defer spanDone()
 	consumeNotCancelled := false
 	produceNotCancelled := false
-	syncConfigNotCancelled := false
 	func() {
 		lib.lock.Lock()
 		defer lib.lock.Unlock()
@@ -486,18 +486,12 @@ func (lib *LibraryNoDB) Shutdown(ctx context.Context) {
 		if lib.produceCtx != nil && lib.produceCtx.Err() == nil {
 			produceNotCancelled = true
 		}
-		if lib.syncConfigCtx != nil && lib.syncConfigCtx.Err() == nil {
-			syncConfigNotCancelled = true
-		}
 	}()
 	if consumeNotCancelled {
 		lib.tracerProvider(ctx)("[events] Shutdown called when the consume context has not been cancelled")
 	}
 	if produceNotCancelled {
 		lib.tracerProvider(ctx)("[events] Shutdown called when the catch up producer context has not been cancelled")
-	}
-	if syncConfigNotCancelled {
-		lib.tracerProvider(ctx)("[events] Shutdown called when the sync config context has not been cancelled")
 	}
 	lib.libraryDone.Wait()
 }
@@ -1071,9 +1065,6 @@ func (lib *LibraryNoDB) contextsToWaitFor() ([]context.Context, <-chan struct{})
 	}
 	if lib.produceCtx != nil {
 		waitFor = append(waitFor, lib.produceCtx)
-	}
-	if lib.syncConfigCtx != nil {
-		waitFor = append(waitFor, lib.syncConfigCtx)
 	}
 	return waitFor, lib.contextUpdate
 }
