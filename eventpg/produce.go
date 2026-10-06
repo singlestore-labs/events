@@ -78,6 +78,42 @@ func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
 }
 
+func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, before time.Time, batchSize int, batchInterval time.Duration) (int64, error) {
+	if batchSize <= 0 {
+		batchSize = events.DefaultTrimBatchSize
+	}
+	if batchSize <= 0 {
+		return 0, errors.Errorf("trim batch size must be positive")
+	}
+	var total int64
+	for {
+		result, err := c.ExecContext(ctx, `
+			DELETE FROM eventsProcessed
+			WHERE (topic, source, id, handlerName) IN (
+				SELECT topic, source, id, handlerName
+				FROM eventsProcessed
+				WHERE topic = $1 AND processedAt < $2
+				ORDER BY processedAt
+				LIMIT $3
+			)`,
+			topic, before, batchSize)
+		if err != nil {
+			return total, errors.Errorf("could not trim processed events for topic (%s): %w", topic, err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return total, errors.Errorf("could not trim processed events for topic (%s): %w", topic, err)
+		}
+		total += rows
+		if rows < int64(batchSize) {
+			return total, nil
+		}
+		if err := events.PauseTrimBatch(ctx, batchInterval); err != nil {
+			return total, err
+		}
+	}
+}
+
 func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.StringEventID, error) {
 	return SaveEventsInsideTx[TX](ctx, c.backupTracer(), tx, c.producer, events...)
 }
@@ -359,6 +395,11 @@ func Migrations(database *libschema.Database) {
 			);
 
 			COMMENT ON TABLE eventsProcessed IS 'persistent data to track exactly-once consumer deliveries';
+			`),
+
+		lspostgres.Script("create-eventsProcessed-topic-processedAt-index", `
+			CREATE INDEX IF NOT EXISTS eventsProcessed_topic_processedAt_idx
+			ON eventsProcessed (topic, processedAt);
 			`),
 	)
 }
