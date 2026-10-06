@@ -53,6 +53,8 @@ const UnregisteredTopicError errors.String = "topic is not pre-registered"
 //
 // Topics will be auto-created when a message is sent. Topics will be auto-created
 // on startup for all topics that are consumed.
+//
+// SetTopicConfig should accept the unprefixed topic name.
 func (lib *LibraryNoDB) SetTopicConfig(topicConfig kafka.TopicConfig) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
@@ -62,6 +64,40 @@ func (lib *LibraryNoDB) SetTopicConfig(topicConfig kafka.TopicConfig) {
 	lib.topicConfig[topicConfig.Topic] = topicConfig
 }
 
+// SetTopicConfigWithDeadLetter is SetTopicConfig plus the same config for every
+// dead-letter topic of topicConfig.Topic. topicConfig.Topic is unprefixed.
+func (lib *LibraryNoDB) SetTopicConfigWithDeadLetter(topicConfig kafka.TopicConfig) {
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	if topicConfig.Topic == "" {
+		panic(errors.Alertf("attempt to register event library topic configuration with an empty topic name"))
+	}
+	lib.topicConfig[topicConfig.Topic] = topicConfig
+
+	deadLetters := make(map[string]struct{})
+	for groupName, group := range lib.readers {
+		topicHandler, ok := group.topics[topicConfig.Topic]
+		if !ok {
+			continue
+		}
+		for _, handler := range topicHandler.handlers {
+			if handler.isDeadLetter {
+				continue
+			}
+			switch handler.onFailure {
+			case eventmodels.OnFailureRetryLater, eventmodels.OnFailureSave:
+				deadLetters[DeadLetterTopic(topicConfig.Topic, groupName)] = struct{}{}
+			}
+		}
+	}
+	for deadLetterTopic := range deadLetters {
+		deadLetterConfig := topicConfig
+		deadLetterConfig.Topic = deadLetterTopic
+		deadLetterConfig.ConfigEntries = append([]kafka.ConfigEntry(nil), topicConfig.ConfigEntries...)
+		lib.topicConfig[deadLetterTopic] = deadLetterConfig
+	}
+}
+
 func (lib *LibraryNoDB) getTopicConfig(unprefixedTopic string) (kafka.TopicConfig, bool) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
@@ -69,33 +105,13 @@ func (lib *LibraryNoDB) getTopicConfig(unprefixedTopic string) (kafka.TopicConfi
 	return c, ok
 }
 
-// UpdateTopicConfig is used to update the topic config for an existing topic.
-// it pulls the config from kafka then compares it to the desired config and applies the changes.
+// UpdateTopicConfig updates every topic registered in topicConfig.
+// It creates those topics, then applies the registered config to them.
 func (lib *LibraryNoDB) UpdateTopicConfig(ctx context.Context) (err error) {
 	lib.lock.Lock()
-	topicsWithDeadLetter := make(map[string][]string, len(lib.topicConfig))
+	topics := make([]string, 0, len(lib.topicConfig))
 	for topic := range lib.topicConfig {
-		topicsWithDeadLetter[topic] = nil
-	}
-	for groupName, group := range lib.readers {
-		for topic, topicHandler := range group.topics {
-			if _, ok := topicsWithDeadLetter[topic]; !ok {
-				continue
-			}
-			deadLetter := false
-			for _, handler := range topicHandler.handlers {
-				if handler.isDeadLetter {
-					continue
-				}
-				switch handler.onFailure {
-				case eventmodels.OnFailureRetryLater, eventmodels.OnFailureSave:
-					deadLetter = true
-				}
-			}
-			if deadLetter {
-				topicsWithDeadLetter[topic] = append(topicsWithDeadLetter[topic], DeadLetterTopic(topic, groupName))
-			}
-		}
+		topics = append(topics, topic)
 	}
 	lib.lock.Unlock()
 
@@ -106,11 +122,11 @@ func (lib *LibraryNoDB) UpdateTopicConfig(ctx context.Context) (err error) {
 		defer func() {
 			<-lib.syncConfigProcess
 		}()
-		err = lib.createTopics(ctx, topicsWithDeadLetter)
+		err = lib.createTopics(ctx, topics)
 		if err != nil {
 			return
 		}
-		err = lib.syncTopicConfigFromKafka(ctx, topicsWithDeadLetter)
+		err = lib.syncTopicConfigFromKafka(ctx, topics)
 	}()
 	return err
 }
@@ -145,10 +161,9 @@ func (lib *LibraryNoDB) getOrDefaultConfig(unprefixedTopic string) kafka.TopicCo
 	return tc
 }
 
-// createTopics creates each original topic and its dead-letter topics.
-// A dead-letter topic is created with its original topic's config.
-func (lib *LibraryNoDB) createTopics(ctx context.Context, topics map[string][]string) error {
-	if len(topics) == 0 {
+// createTopics creates each topic in unprefixedTopics.
+func (lib *LibraryNoDB) createTopics(ctx context.Context, unprefixedTopics []string) error {
+	if len(unprefixedTopics) == 0 {
 		return nil
 	}
 	client, err := lib.getController(ctx)
@@ -156,23 +171,21 @@ func (lib *LibraryNoDB) createTopics(ctx context.Context, topics map[string][]st
 		return errors.Errorf("event library could not get kafka controller: %w", err)
 	}
 
-	topicConfigs := make([]kafka.TopicConfig, 0, len(topics))
-	for original, deadLetters := range topics {
-		originalConfig := lib.getOrDefaultConfig(original)
-		topicConfigs = append(topicConfigs, originalConfig)
-		for _, deadLetter := range deadLetters {
-			deadLetterConfig := originalConfig
-			deadLetterConfig.Topic = lib.addPrefix(deadLetter)
-			deadLetterConfig.ConfigEntries = append([]kafka.ConfigEntry(nil), originalConfig.ConfigEntries...)
-			topicConfigs = append(topicConfigs, deadLetterConfig)
+	topicConfigs := make([]kafka.TopicConfig, 0, len(unprefixedTopics))
+	seen := make(map[string]struct{}, len(unprefixedTopics))
+	for _, topic := range unprefixedTopics {
+		if _, ok := seen[topic]; ok {
+			continue
 		}
+		seen[topic] = struct{}{}
+		topicConfigs = append(topicConfigs, lib.getOrDefaultConfig(topic))
 	}
 
 	resp, err := client.CreateTopics(ctx, &kafka.CreateTopicsRequest{
 		Topics: topicConfigs,
 	})
 	if err != nil {
-		return errors.Errorf("could not create topics %v: %w", topics, err)
+		return errors.Errorf("could not create topics %v: %w", unprefixedTopics, err)
 	}
 	respErrors := make([]error, 0)
 	for t, e := range resp.Errors {
@@ -209,14 +222,9 @@ func (lib *LibraryNoDB) describeTopicConfigs(ctx context.Context, unprefixedTopi
 	return rsp, nil
 }
 
-// syncTopicConfigFromKafka describes and compares original topics only.
-// When an original topic's config changes, the same change is applied to its dead-letter topics.
-func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context, topics map[string][]string) error {
-	originals := make([]string, 0, len(topics))
-	for original := range topics {
-		originals = append(originals, original)
-	}
-	rsp, err := lib.describeTopicConfigs(ctx, originals)
+// syncTopicConfigFromKafka describes topics and applies the cached config where it differs.
+func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context, topics []string) error {
+	rsp, err := lib.describeTopicConfigs(ctx, topics)
 	if err != nil {
 		return err
 	}
@@ -226,7 +234,7 @@ func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context, topics map
 	}
 
 	updateResp, err := client.IncrementalAlterConfigs(ctx, &kafka.IncrementalAlterConfigsRequest{
-		Resources: lib.handleDescribeTopicResponse(rsp, topics),
+		Resources: lib.handleDescribeTopicResponse(rsp),
 	})
 	if err != nil {
 		return errors.Wrapf(err, "failed to update topics config")
@@ -241,7 +249,7 @@ func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context, topics map
 // handleDescribeTopicResponse compare with lib cache topic config that
 // 1. generate incremental update request if lib cache exists and different with the describe response.
 // 2. save config to lib cache when there is no one.
-func (lib *LibraryNoDB) handleDescribeTopicResponse(rsp *kafka.DescribeConfigsResponse, topicsWithDeadLetter map[string][]string) []kafka.IncrementalAlterConfigsRequestResource {
+func (lib *LibraryNoDB) handleDescribeTopicResponse(rsp *kafka.DescribeConfigsResponse) []kafka.IncrementalAlterConfigsRequestResource {
 	incReqResources := make([]kafka.IncrementalAlterConfigsRequestResource, 0)
 
 	for _, kTopicConfig := range rsp.Resources {
@@ -287,12 +295,6 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(rsp *kafka.DescribeConfigsRe
 		}
 		if len(currentReqResource.Configs) > 0 {
 			incReqResources = append(incReqResources, currentReqResource)
-			for _, deadLetter := range topicsWithDeadLetter[unprefixedTopicName] {
-				deadLetterResource := currentReqResource
-				deadLetterResource.ResourceName = lib.addPrefix(deadLetter)
-				deadLetterResource.Configs = append([]kafka.IncrementalAlterConfigsRequestConfig(nil), currentReqResource.Configs...)
-				incReqResources = append(incReqResources, deadLetterResource)
-			}
 		}
 		lib.topicConfig[unprefixedTopicName] = existTopicConfig
 	}
@@ -385,13 +387,21 @@ func (lib *Library[ID, TX, DB]) TrimDB(ctx context.Context, margin time.Duration
 	if len(exactlyOnceTopics) == 0 {
 		return nil
 	}
+	topicNames := func() []string {
+		names := make([]string, 0, len(exactlyOnceTopics))
+		for original, deadLetters := range exactlyOnceTopics {
+			names = append(names, original)
+			names = append(names, deadLetters...)
+		}
+		return names
+	}()
 
-	err := lib.createTopics(ctx, exactlyOnceTopics)
+	err := lib.createTopics(ctx, topicNames)
 	if err != nil {
 		return err
 	}
 
-	rsp, err := lib.describeTopicConfigs(ctx, topicWithDeadLetterToList(exactlyOnceTopics))
+	rsp, err := lib.describeTopicConfigs(ctx, topicNames)
 	if err != nil {
 		return err
 	}
@@ -462,15 +472,6 @@ func (lib *Library[ID, TX, DB]) TrimDB(ctx context.Context, margin time.Duration
 		lib.logf(ctx, "[events] trimmed %d exactly-once records for topic %s older than %s", deleted, topic, cutoff.Format(time.RFC3339))
 	}
 	return errors.Join(trimErrs...)
-}
-
-func topicWithDeadLetterToList(topicsWithDeadLetter map[string][]string) []string {
-	names := make([]string, 0, len(topicsWithDeadLetter))
-	for original, deadLetters := range topicsWithDeadLetter {
-		names = append(names, original)
-		names = append(names, deadLetters...)
-	}
-	return names
 }
 
 // topicRetentionAndSegment returns retention.ms + segment.ms. A negative config means no time limit.

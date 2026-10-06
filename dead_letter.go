@@ -27,7 +27,7 @@ func DeadLetterTopic(unprefixedTopic string, consumerGroup ConsumerGroupName) st
 // use dead letter handling and if so creates the dead letter topics and starts dead letter
 // consumers.
 func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(startupCtx context.Context, baseCtx context.Context, consumerGroup consumerGroupName, originalGroup *group, limiter *limit, allStarted *sync.WaitGroup, groupDone *sync.WaitGroup) {
-	preCreate := make(map[string][]string)
+	preCreate := make([]string, 0, len(originalGroup.topics))
 	for topic, topicHandler := range originalGroup.topics {
 		var doCreate bool
 		for _, handler := range topicHandler.handlers {
@@ -42,13 +42,22 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(startupCtx context.Cont
 		if !doCreate {
 			continue
 		}
-		preCreate[topic] = append(preCreate[topic], DeadLetterTopic(topic, consumerGroup))
+		dlTopic := DeadLetterTopic(topic, consumerGroup)
+		preCreate = append(preCreate, dlTopic)
+		// Use the original topic's config only when the dead-letter topic has none.
+		if _, ok := lib.getTopicConfig(dlTopic); !ok {
+			if config, ok := lib.getTopicConfig(topic); ok {
+				config.Topic = dlTopic
+				lib.SetTopicConfig(config)
+			}
+		}
 	}
 	if len(preCreate) == 0 {
 		return
 	}
-	// Original topics are created first. Dead-letter topics use that original config.
-	err := lib.createTopics(startupCtx, preCreate)
+	// This shouldn't error because the precreate for the non-dead letter versions
+	// succeeded before this was called
+	err := lib.precreateTopicsForConsuming(startupCtx, consumerGroup, preCreate)
 	if err != nil {
 		if e := startupCtx.Err(); e == nil {
 			lib.logf(startupCtx, "[events] UNEXPECTED ERROR creating topics for dead letter consumption, not consuming dead letter topics: %+v", err)
@@ -84,7 +93,10 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(startupCtx context.Cont
 			setConfig = true
 		}
 		if setConfig {
-			if _, ok := lib.getTopicConfig(topic); !ok && lib.mustRegisterTopics {
+			topicConfig, ok := lib.getTopicConfig(topic)
+			if ok {
+				lib.SetTopicConfig(topicConfig)
+			} else if lib.mustRegisterTopics {
 				panic(errors.Alertf("unexpected missing topic config for topic (%s)", topic))
 			}
 		}
