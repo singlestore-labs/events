@@ -18,6 +18,7 @@ import (
 	"github.com/singlestore-labs/events"
 	"github.com/singlestore-labs/events/eventdb"
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/events/internal"
 	"github.com/singlestore-labs/generic"
 )
 
@@ -80,7 +81,7 @@ func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic
 
 func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, before time.Time, batchSize int, batchInterval time.Duration) (int64, error) {
 	if batchSize <= 0 {
-		batchSize = events.DefaultTrimBatchSize
+		batchSize = internal.DefaultTrimBatchSize
 	}
 	if batchSize <= 0 {
 		return 0, errors.Errorf("trim batch size must be positive")
@@ -108,7 +109,7 @@ func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic strin
 		if rows < int64(batchSize) {
 			return total, nil
 		}
-		if err := events.PauseTrimBatch(ctx, batchInterval); err != nil {
+		if err := internal.PauseTrimBatch(ctx, batchInterval); err != nil {
 			return total, err
 		}
 	}
