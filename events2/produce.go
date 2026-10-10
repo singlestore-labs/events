@@ -19,6 +19,7 @@ import (
 	"github.com/singlestore-labs/events"
 	"github.com/singlestore-labs/events/eventdb"
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/events/internal"
 	"github.com/singlestore-labs/generic"
 )
 
@@ -87,6 +88,13 @@ func Migrations(database *libschema.Database, singlestore *lssinglestore.SingleS
 				SHARD KEY	(topic, source, id, handlerName)
 			)
 			COMMENT 'persistent data to track exactly-once consumer deliveries'`),
+
+		lssinglestore.Script("create-eventsProcessed-topic-processedAt-index", `
+			CREATE INDEX eventsProcessed_topic_processedAt_idx ON eventsProcessed (topic, processedAt)`,
+			libschema.SkipIf(func() (bool, error) {
+				return singlestore.TableHasIndex("eventsProcessed", "eventsProcessed_topic_processedAt_idx")
+			}),
+		),
 	)
 }
 
@@ -130,6 +138,38 @@ func (c *Connection[TX, DB]) ProduceDroppedTxEvents(ctx context.Context, batchSi
 
 func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
+}
+
+func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, olderThanMs int64, batchSize int, interval time.Duration) (int64, error) {
+	if batchSize <= 0 {
+		return 0, errors.Errorf("trim batch size %d must be positive", batchSize)
+	}
+	if olderThanMs <= 0 {
+		return 0, errors.Errorf("trim olderThanMs %d must be positive", olderThanMs)
+	}
+	var total int64
+	for {
+		result, err := c.ExecContext(ctx, `
+			DELETE FROM eventsProcessed
+			WHERE topic = ? AND processedAt < NOW(6) - INTERVAL (? * 1000) MICROSECOND
+			ORDER BY processedAt
+			LIMIT ?`,
+			topic, olderThanMs, batchSize)
+		if err != nil {
+			return total, errors.Errorf("could not trim processed events for topic (%s): %w", topic, err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return total, errors.Errorf("could not trim processed events for topic (%s): %w", topic, err)
+		}
+		total += rows
+		if rows < int64(batchSize) {
+			return total, nil
+		}
+		if err := internal.PauseTrimBatch(ctx, interval); err != nil {
+			return total, err
+		}
+	}
 }
 
 func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {

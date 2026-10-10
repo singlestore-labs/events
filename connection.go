@@ -145,6 +145,7 @@ type LibraryNoDB struct {
 	prefix                    string // prefixes all topics and consumer groups
 	consumeCtx                context.Context
 	produceCtx                context.Context
+	syncConfigProcess         chan struct{}
 	contextUpdate             chan struct{}
 	shutdownCtx               context.Context
 	shutdownCancel            context.CancelFunc
@@ -198,6 +199,7 @@ type registeredHandler struct {
 	retry              bool
 	timeout            time.Duration
 	handler            canHandle
+	exactlyOnce        bool
 	name               string
 	onFailure          eventmodels.OnFailure
 	isDeadLetter       bool
@@ -267,6 +269,7 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 			contextUpdate:            make(chan struct{}),
 			shutdownCtx:              shutdownCtx,
 			shutdownCancel:           shutdownCancel,
+			syncConfigProcess:        make(chan struct{}, 1),
 			sizeCapBrokerReady:       make(chan struct{}),
 			sizeCapDefaultAssumed:    1_000_000,
 			tracerProvider:           func(context.Context) eventmodels.Tracer { return log.Printf },
@@ -524,7 +527,7 @@ func (lib *Library[ID, TX, DB]) ConsumeExactlyOnce(consumerGroup ConsumerGroupNa
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
 	lib.mustNotBeRunning("attempt configure event consumer in library that is already processing")
-	lib.getTopicHandler(consumerGroup, handler.GetTopic()).addHandler(handlerName, onFailure, &lib.LibraryNoDB, handler, opts)
+	lib.getTopicHandler(consumerGroup, handler.GetTopic()).addHandler(handlerName, onFailure, &lib.LibraryNoDB, handler, append([]HandlerOpt{withExactlyOnce()}, opts...))
 	lib.hasTxConsumers = true
 }
 
@@ -671,6 +674,12 @@ func WithConcurrency(parallelism int) HandlerOpt {
 func IsDeadLetterHandler(isDeadLetter bool) HandlerOpt {
 	return func(r *registeredHandler, _ *LibraryNoDB) {
 		r.isDeadLetter = isDeadLetter
+	}
+}
+
+func withExactlyOnce() HandlerOpt {
+	return func(r *registeredHandler, _ *LibraryNoDB) {
+		r.exactlyOnce = true
 	}
 }
 
@@ -1057,7 +1066,7 @@ func (lib *LibraryNoDB) threadContextOld(backupCtx context.Context, spanMap map[
 func (lib *LibraryNoDB) contextsToWaitFor() ([]context.Context, <-chan struct{}) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
-	waitFor := make([]context.Context, 0, 2)
+	waitFor := make([]context.Context, 0, 3)
 	if lib.consumeCtx != nil {
 		waitFor = append(waitFor, lib.consumeCtx)
 	}
