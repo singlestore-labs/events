@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"math/rand"
+	"slices"
 	"strconv"
 	"time"
 
@@ -55,6 +56,7 @@ const UnregisteredTopicError errors.String = "topic is not pre-registered"
 // on startup for all topics that are consumed.
 //
 // SetTopicConfig should accept the unprefixed topic name.
+// SetTopicConfig Should before all other service start up. sqsq should we recommend put it in init()?
 func (lib *LibraryNoDB) SetTopicConfig(topicConfig kafka.TopicConfig) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
@@ -74,23 +76,27 @@ func (lib *LibraryNoDB) getTopicConfig(unprefixedTopic string) (kafka.TopicConfi
 // UpdateTopicConfigs updates every topic registered in topicConfig.
 // If a topic doesn't already exist, it will be created.
 func (lib *LibraryNoDB) UpdateTopicConfigs(ctx context.Context) (err error) {
-	topics, err := func() ([]string, error) {
+	topics := func() []string {
 		lib.lock.Lock()
-		defer lib.lock.Unlock()
-		if lib.ready.Load() == isShutdown {
-			return nil, errors.Errorf("[event] cancel update topic config, event library has been shut down")
-		}
+		defer func() {
+			if lib.ready.Load() == isShutdown {
+				err = errors.Errorf("[event] cancel update topic config, event library has been shut down")
+			} else {
+				lib.libraryDone.Add(1)
+			}
+			lib.lock.Unlock() // never put return before it
+		}()
+
 		topics := make([]string, 0, len(lib.topicConfig))
 		for topic := range lib.topicConfig {
 			topics = append(topics, topic)
 		}
-		return topics, nil
+		return topics
 	}()
 	if err != nil {
 		return err
 	}
 
-	lib.libraryDone.Add(1)
 	defer lib.libraryDone.Done()
 	select {
 	case <-ctx.Done():
@@ -136,6 +142,16 @@ func (lib *LibraryNoDB) getOrDefaultConfig(unprefixedTopic string) kafka.TopicCo
 		})
 	}
 	return tc
+}
+
+func (lib *LibraryNoDB) setUpDeadLetterTopicConfigHelper(topic, deadLetterTopic string) {
+	if _, ok := lib.getTopicConfig(deadLetterTopic); !ok {
+		if config, ok := lib.getTopicConfig(topic); ok {
+			config.Topic = deadLetterTopic
+			config.ConfigEntries = slices.Clone(config.ConfigEntries)
+			lib.SetTopicConfig(config)
+		}
+	}
 }
 
 // createTopics creates each topic in unprefixedTopics. Topics must be unique.
@@ -233,6 +249,8 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsR
 		return incReqResources
 	}
 
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
 	for _, kTopicConfig := range resp.Resources {
 		unprefixedTopicName := lib.removePrefix(kTopicConfig.ResourceName)
 		existTopicConfig, ok := lib.topicConfig[unprefixedTopicName]
@@ -340,6 +358,14 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 	if len(exactlyOnceUnprefixedTopics) == 0 {
 		return nil
 	}
+
+	// Use the original topic's config only when the dead-letter topic has none.
+	for original, deadLetters := range exactlyOnceUnprefixedTopics {
+		for _, deadLetter := range deadLetters {
+			lib.setUpDeadLetterTopicConfigHelper(original, deadLetter)
+		}
+	}
+
 	unprefixedTopicNames := func() []string {
 		names := make([]string, 0, len(exactlyOnceUnprefixedTopics))
 		for original, deadLetters := range exactlyOnceUnprefixedTopics {
