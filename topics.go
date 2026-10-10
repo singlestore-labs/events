@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"strconv"
 	"time"
@@ -137,7 +138,7 @@ func (lib *LibraryNoDB) getOrDefaultConfig(unprefixedTopic string) kafka.TopicCo
 	return tc
 }
 
-// createTopics creates each topic in unprefixedTopics.
+// createTopics creates each topic in unprefixedTopics. Topics must be unique.
 func (lib *LibraryNoDB) createTopics(ctx context.Context, unprefixedTopics []string) error {
 	if len(unprefixedTopics) == 0 {
 		return nil
@@ -203,7 +204,7 @@ func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context, topics []s
 		return err
 	}
 	if resp == nil {
-		return errors.Errorf("failed to describe topics-%v, nil response")
+		return errors.Errorf("failed to describe topics-%v, nil response", topics)
 	}
 	client, err := lib.getController(ctx)
 	if err != nil {
@@ -285,21 +286,22 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsR
 // should no longer exist in Kafka and thus won't be re-presented.
 //
 // The cutoff is the original topic's retention.ms + segment.ms,
-// plus the longest dead-letter retention.ms + segment.ms, plus margin.
+// plus the longest dead-letter retention.ms + segment.ms, plus marginMs.
 // Those durations come from the configs Kafka reports, including for dead-letter topics created from the original.
+// The cutoff is measured against the database's clock.
 //
+// marginMs is extra time to keep records, in milliseconds.
 // batchSize is the number of rows deleted per statement.
-// interval is the pause after a full batch. interval == 0 does not pause.
-// marginMs is used for milliseconds
+// batchInterval is the pause after a full batch. batchInterval == 0 does not pause.
 func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Context, marginMs int64, batchSize int, batchInterval time.Duration) error {
 	if marginMs < 0 {
-		return errors.Errorf("trim margin must not be negative")
+		return errors.Errorf("trim margin %dms must not be negative", marginMs)
 	}
 	if batchSize <= 0 {
-		return errors.Errorf("trim batch size must be positive")
+		return errors.Errorf("trim batch size %d must be positive", batchSize)
 	}
 	if batchInterval < 0 {
-		return errors.Errorf("trim batch interval must not negative")
+		return errors.Errorf("trim batch interval %s must not be negative", batchInterval)
 	}
 	if !lib.HasDB() {
 		return errors.Errorf("event library trim requires a database")
@@ -372,16 +374,16 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 			trimErrs = append(trimErrs, errors.Wrapf(original.Error, "could not describe topic %s", topic))
 			continue
 		}
-		originalKeep, err := topicRetentionAndSegment(original.ConfigEntries)
+		originalKeepMs, err := topicRetentionAndSegmentMs(original.ConfigEntries)
 		if err != nil {
 			trimErrs = append(trimErrs, errors.Wrapf(err, "could not trim topic %s", topic))
 			continue
 		}
-		if originalKeep < 0 {
+		if originalKeepMs < 0 {
 			lib.logf(ctx, "[events] skip trim of topic %s, retention.ms or segment.ms is unlimited", topic)
 			continue
 		}
-		var longestDeadLetter int64
+		var longestDeadLetterMs int64
 		skip := false
 		for _, deadLetter := range deadLetters {
 			resource, ok := unprefixedDescribed[deadLetter]
@@ -395,40 +397,44 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 				skip = true
 				break
 			}
-			deadLetterKeep, err := topicRetentionAndSegment(resource.ConfigEntries)
+			deadLetterKeepMs, err := topicRetentionAndSegmentMs(resource.ConfigEntries)
 			if err != nil {
 				trimErrs = append(trimErrs, errors.Wrapf(err, "could not trim topic %s", topic))
 				skip = true
 				break
 			}
-			if deadLetterKeep < 0 {
+			if deadLetterKeepMs < 0 {
 				lib.logf(ctx, "[events] skip trim of topic %s, dead letter topic %s retention.ms or segment.ms is unlimited", topic, deadLetter)
 				skip = true
 				break
 			}
-			if deadLetterKeep > longestDeadLetter {
-				longestDeadLetter = deadLetterKeep
+			if deadLetterKeepMs > longestDeadLetterMs {
+				longestDeadLetterMs = deadLetterKeepMs
 			}
 		}
 		if skip {
 			continue
 		}
-		olderThan := originalKeep + longestDeadLetter + marginMs
-		deleted, err := lib.db.TrimEventsProcessed(ctx, topic, olderThan, batchSize, batchInterval)
+		if originalKeepMs > math.MaxInt64-longestDeadLetterMs-marginMs {
+			lib.logf(ctx, "[events] skip trim of topic %s, retention plus margin overflows", topic)
+			continue
+		}
+		olderThanMs := originalKeepMs + longestDeadLetterMs + marginMs
+		deleted, err := lib.db.TrimEventsProcessed(ctx, topic, olderThanMs, batchSize, batchInterval)
 		if err != nil {
 			trimErrs = append(trimErrs, err)
 			continue
 		}
-		lib.logf(ctx, "[events] trimmed %d exactly-once records for topic %q with older than %s", deleted, topic, (time.Duration(olderThan) * time.Millisecond).String())
+		lib.logf(ctx, "[events] trimmed %d exactly-once records for topic %q older than %dms", deleted, topic, olderThanMs)
 	}
 	return errors.Join(trimErrs...)
 }
 
-// topicRetentionAndSegment returns retention.ms + segment.ms. A negative config means no time limit.
+// topicRetentionAndSegmentMs returns retention.ms + segment.ms. A negative result means no time limit.
 // https://kafka.apache.org/documentation/#topicconfigs_retention.ms
 // https://kafka.apache.org/documentation/#topicconfigs_segment.ms
-func topicRetentionAndSegment(entries []kafka.DescribeConfigResponseConfigEntry) (int64, error) {
-	topicConfigDuration := func(name string) (int64, error) {
+func topicRetentionAndSegmentMs(entries []kafka.DescribeConfigResponseConfigEntry) (int64, error) {
+	configMs := func(name string) (int64, error) {
 		for _, entry := range entries {
 			if entry.ConfigName != name {
 				continue
@@ -441,13 +447,16 @@ func topicRetentionAndSegment(entries []kafka.DescribeConfigResponseConfigEntry)
 		}
 		return 0, errors.Errorf("topic config %s is missing", name)
 	}
-	retention, err := topicConfigDuration("retention.ms")
+	retention, err := configMs("retention.ms")
 	if err != nil || retention < 0 {
 		return retention, err
 	}
-	segment, err := topicConfigDuration("segment.ms")
+	segment, err := configMs("segment.ms")
 	if err != nil || segment < 0 {
 		return segment, err
+	}
+	if retention > math.MaxInt64-segment {
+		return -1, nil
 	}
 	return retention + segment, nil
 }

@@ -142,7 +142,10 @@ func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic
 
 func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, olderThanMs int64, batchSize int, interval time.Duration) (int64, error) {
 	if batchSize <= 0 {
-		return 0, errors.Errorf("trim batch size must be positive")
+		return 0, errors.Errorf("trim batch size %d must be positive", batchSize)
+	}
+	if olderThanMs <= 0 {
+		return 0, errors.Errorf("trim olderThanMs %d must be positive", olderThanMs)
 	}
 	var total int64
 	for {
