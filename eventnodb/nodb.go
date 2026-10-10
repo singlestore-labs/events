@@ -43,7 +43,7 @@ func (*NoDB) MarkEventProcessed(_ context.Context, _ *NoDBTx, _ string, _ string
 	return errors.Alert(eventmodels.NotImplementedErr)
 }
 
-func (*NoDB) TrimEventsProcessed(_ context.Context, _ string, _ time.Time, _ int, _ time.Duration) (int64, error) {
+func (*NoDB) TrimEventsProcessed(_ context.Context, _ string, _ int64, _ int, _ time.Duration) (int64, error) {
 	return 0, errors.Alert(eventmodels.NotImplementedErr)
 }
 

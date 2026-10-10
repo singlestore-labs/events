@@ -140,10 +140,7 @@ func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
 }
 
-func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, before time.Time, batchSize int, interval time.Duration) (int64, error) {
-	if batchSize <= 0 {
-		batchSize = internal.DefaultTrimBatchSize
-	}
+func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, olderThanMs int64, batchSize int, interval time.Duration) (int64, error) {
 	if batchSize <= 0 {
 		return 0, errors.Errorf("trim batch size must be positive")
 	}
@@ -151,10 +148,10 @@ func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic strin
 	for {
 		result, err := c.ExecContext(ctx, `
 			DELETE FROM eventsProcessed
-			WHERE topic = ? AND processedAt < ?
+			WHERE topic = ? AND processedAt < NOW(6) - INTERVAL (? * 1000) MICROSECOND
 			ORDER BY processedAt
 			LIMIT ?`,
-			topic, before, batchSize)
+			topic, olderThanMs, batchSize)
 		if err != nil {
 			return total, errors.Errorf("could not trim processed events for topic (%s): %w", topic, err)
 		}

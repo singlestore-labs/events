@@ -3,21 +3,14 @@ package internal
 import (
 	"context"
 	"time"
+
+	"github.com/memsql/errors"
 )
 
-// DefaultTrimBatchSize is how many eventsProcessed rows one delete statement removes
-// when TrimDB is called with batchSize <= 0.
-var DefaultTrimBatchSize = 1000
-
-// DefaultTrimBatchInterval is the pause after a full trim batch when TrimDB is called
-// with interval < 0.
-var DefaultTrimBatchInterval = 100 * time.Millisecond
-
 // PauseTrimBatch waits between full trim batches. interval == 0 returns immediately.
-// interval < 0 uses DefaultTrimBatchInterval.
 func PauseTrimBatch(ctx context.Context, batchInterval time.Duration) error {
 	if batchInterval < 0 {
-		batchInterval = DefaultTrimBatchInterval
+		return errors.Errorf("input batch interval %d must not negative", batchInterval)
 	}
 	if batchInterval == 0 {
 		return nil

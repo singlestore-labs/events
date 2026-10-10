@@ -199,6 +199,7 @@ type registeredHandler struct {
 	retry              bool
 	timeout            time.Duration
 	handler            canHandle
+	exactlyOnce        bool
 	name               string
 	onFailure          eventmodels.OnFailure
 	isDeadLetter       bool
@@ -526,7 +527,7 @@ func (lib *Library[ID, TX, DB]) ConsumeExactlyOnce(consumerGroup ConsumerGroupNa
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
 	lib.mustNotBeRunning("attempt configure event consumer in library that is already processing")
-	lib.getTopicHandler(consumerGroup, handler.GetTopic()).addHandler(handlerName, onFailure, &lib.LibraryNoDB, handler, opts)
+	lib.getTopicHandler(consumerGroup, handler.GetTopic()).addHandler(handlerName, onFailure, &lib.LibraryNoDB, handler, append([]HandlerOpt{withExactlyOnce()}, opts...))
 	lib.hasTxConsumers = true
 }
 
@@ -673,6 +674,12 @@ func WithConcurrency(parallelism int) HandlerOpt {
 func IsDeadLetterHandler(isDeadLetter bool) HandlerOpt {
 	return func(r *registeredHandler, _ *LibraryNoDB) {
 		r.isDeadLetter = isDeadLetter
+	}
+}
+
+func withExactlyOnce() HandlerOpt {
+	return func(r *registeredHandler, _ *LibraryNoDB) {
+		r.exactlyOnce = true
 	}
 }
 

@@ -89,7 +89,11 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(startupCtx context.Cont
 				}
 				dlGroup.topics[dlTopic] = dlTopicHandler
 			}
-			dlTopicHandler.addHandler(handlerName, eventmodels.OnFailureBlock, &lib.LibraryNoDB, handler.handler, []HandlerOpt{WithRetrying(true), IsDeadLetterHandler(true), WithQueueDepthLimit(maximumDeadLetterOutstanding)})
+			deadLetterOpts := []HandlerOpt{WithRetrying(true), IsDeadLetterHandler(true), WithQueueDepthLimit(maximumDeadLetterOutstanding)}
+			if handler.exactlyOnce {
+				deadLetterOpts = append(deadLetterOpts, withExactlyOnce())
+			}
+			dlTopicHandler.addHandler(handlerName, eventmodels.OnFailureBlock, &lib.LibraryNoDB, handler.handler, deadLetterOpts)
 			setConfig = true
 		}
 		if setConfig {
