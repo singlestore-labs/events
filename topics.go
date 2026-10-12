@@ -344,7 +344,7 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 				var exactlyOnce bool
 				var needDeadLetterTopic bool
 				for _, handler := range topicHandler.handlers {
-					if handler.isDeadLetter || !handler.exactlyOnce {
+					if !handler.exactlyOnce {
 						continue
 					}
 					exactlyOnce = true
@@ -415,6 +415,7 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 		found := false
 		for _, e := range original.ConfigEntries {
 			if e.ConfigName == "message.timestamp.type" && e.ConfigValue == "CreateTime" {
+				found = true
 				continue // skip if it's CreateTime
 			}
 		}
