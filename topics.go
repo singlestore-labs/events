@@ -56,7 +56,6 @@ const UnregisteredTopicError errors.String = "topic is not pre-registered"
 // on startup for all topics that are consumed.
 //
 // SetTopicConfig should accept the unprefixed topic name.
-// SetTopicConfig Should before all other service start up. sqsq should we recommend put it in init()?
 func (lib *LibraryNoDB) SetTopicConfig(topicConfig kafka.TopicConfig) {
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
@@ -75,6 +74,10 @@ func (lib *LibraryNoDB) getTopicConfig(unprefixedTopic string) (kafka.TopicConfi
 
 // UpdateTopicConfigs updates every topic registered in topicConfig.
 // If a topic doesn't already exist, it will be created.
+//
+// Side Effect: if set for the topic, then should do all config for the topic with this library.
+// the process will cache the missing config entries from kafka and treat it as source of truce.
+// Which means it will be override if any later change only on the kafka side.
 func (lib *LibraryNoDB) UpdateTopicConfigs(ctx context.Context) (err error) {
 	topics := func() []string {
 		lib.lock.Lock()
@@ -207,7 +210,13 @@ func (lib *LibraryNoDB) describeTopicConfigs(ctx context.Context, unprefixedTopi
 	if err != nil {
 		return nil, errors.Wrapf(err, "could not get topics config from kafka")
 	}
-	return resp, nil
+	respErrors := make([]error, 0)
+	for _, r := range resp.Resources {
+		if r.Error != nil {
+			respErrors = append(respErrors, r.Error)
+		}
+	}
+	return resp, errors.Join(respErrors...)
 }
 
 // syncTopicConfigFromKafka describes topics and applies the cached config where it differs.
@@ -311,6 +320,8 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsR
 // marginMs is extra time to keep records, in milliseconds.
 // batchSize is the number of rows deleted per statement.
 // batchInterval is the pause after a full batch. batchInterval == 0 does not pause.
+//
+// NOTE: Trim does not support topic with message.timestamp.type = "CreateTime", it skip trim those topic.
 func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Context, marginMs int64, batchSize int, batchInterval time.Duration) error {
 	if marginMs < 0 {
 		return errors.Errorf("trim margin %dms must not be negative", marginMs)
@@ -400,6 +411,17 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 			trimErrs = append(trimErrs, errors.Wrapf(original.Error, "could not describe topic %s", topic))
 			continue
 		}
+
+		found := false
+		for _, e := range original.ConfigEntries {
+			if e.ConfigName == "message.timestamp.type" && e.ConfigValue == "CreateTime" {
+				continue // skip if it's CreateTime
+			}
+		}
+		if !found {
+			continue // skip if not found the timestamp type
+		}
+
 		originalKeepMs, err := topicRetentionAndSegmentMs(original.ConfigEntries)
 		if err != nil {
 			trimErrs = append(trimErrs, errors.Wrapf(err, "could not trim topic %s", topic))

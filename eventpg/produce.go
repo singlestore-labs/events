@@ -86,6 +86,9 @@ func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic strin
 	if olderThanMs <= 0 {
 		return 0, errors.Errorf("trim olderThanMs %d must be positive", olderThanMs)
 	}
+	if batchInterval < 0 {
+		return 0, errors.Errorf("trim batch interval %d must not be negative", batchInterval)
+	}
 	var total int64
 	for {
 		result, err := c.ExecContext(ctx, `
