@@ -44,11 +44,8 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(startupCtx context.Cont
 		}
 		dlTopic := DeadLetterTopic(topic, consumerGroup)
 		preCreate = append(preCreate, dlTopic)
-		// pre-configure the dead-letter topic to match the original topic
-		if config, ok := lib.getTopicConfig(topic); ok {
-			config.Topic = dlTopic
-			lib.SetTopicConfig(config)
-		}
+		// Use the original topic's config only when the dead-letter topic has none.
+		lib.setUpDeadLetterTopicConfigHelper(topic, dlTopic)
 	}
 	if len(preCreate) == 0 {
 		return
@@ -87,7 +84,11 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(startupCtx context.Cont
 				}
 				dlGroup.topics[dlTopic] = dlTopicHandler
 			}
-			dlTopicHandler.addHandler(handlerName, eventmodels.OnFailureBlock, &lib.LibraryNoDB, handler.handler, []HandlerOpt{WithRetrying(true), IsDeadLetterHandler(true), WithQueueDepthLimit(maximumDeadLetterOutstanding)})
+			deadLetterOpts := []HandlerOpt{WithRetrying(true), IsDeadLetterHandler(true), WithQueueDepthLimit(maximumDeadLetterOutstanding)}
+			if handler.exactlyOnce {
+				deadLetterOpts = append(deadLetterOpts, withExactlyOnce())
+			}
+			dlTopicHandler.addHandler(handlerName, eventmodels.OnFailureBlock, &lib.LibraryNoDB, handler.handler, deadLetterOpts)
 			setConfig = true
 		}
 		if setConfig {
@@ -97,7 +98,6 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(startupCtx context.Cont
 			} else if lib.mustRegisterTopics {
 				panic(errors.Alertf("unexpected missing topic config for topic (%s)", topic))
 			}
-			topicConfig.Topic = DeadLetterTopic(topic, consumerGroup)
 		}
 	}
 	if startConsumer {
