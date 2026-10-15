@@ -112,7 +112,7 @@ func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic strin
 		if rows < int64(batchSize) {
 			return total, nil
 		}
-		if err := internal.PauseTrimBatch(ctx, batchInterval); err != nil {
+		if err := internal.Sleep(ctx, batchInterval); err != nil {
 			return total, err
 		}
 	}

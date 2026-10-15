@@ -7,15 +7,15 @@ import (
 	"github.com/memsql/errors"
 )
 
-// PauseTrimBatch waits between full trim batches. interval == 0 returns immediately.
-func PauseTrimBatch(ctx context.Context, batchInterval time.Duration) error {
-	if batchInterval < 0 {
-		return errors.Errorf("trim batch interval %s must not be negative", batchInterval)
+// Sleep waits for duration or for context cancel, whichever comes first
+func Sleep(ctx context.Context, duration time.Duration) error {
+	if duration < 0 {
+		return errors.Errorf("trim batch interval %s must not be negative", duration)
 	}
-	if batchInterval == 0 {
+	if duration == 0 {
 		return nil
 	}
-	timer := time.NewTimer(batchInterval)
+	timer := time.NewTimer(duration)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
