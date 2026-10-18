@@ -80,7 +80,7 @@ func (lib *LibraryNoDB) UpdateTopicConfigs(ctx context.Context) (err error) {
 		defer lib.lock.Unlock()
 		defer func() {
 			if lib.ready.Load() == isShutdown {
-				err = errors.Errorf("[event] cancel update topic config, event library has been shut down")
+				err = errors.Errorf("event library has been shut down, cannot update topic configs: %w", lib.shutdownCtx.Err())
 			} else {
 				lib.libraryDone.Add(1)
 			}
@@ -100,6 +100,8 @@ func (lib *LibraryNoDB) UpdateTopicConfigs(ctx context.Context) (err error) {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-lib.shutdownCtx.Done():
+		return errors.Errorf("event library has been shut down, cannot update topic configs: %w", lib.shutdownCtx.Err())
 	case lib.syncConfigProcess <- struct{}{}:
 	}
 
@@ -233,8 +235,13 @@ func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context, unprefixed
 		return errors.Errorf("event library could not get kafka controller: %w", err)
 	}
 
+	incRequestResources, err := lib.handleDescribeTopicResponse(resp)
+	if err != nil {
+		return err
+	}
+
 	updateResp, err := client.IncrementalAlterConfigs(ctx, &kafka.IncrementalAlterConfigsRequest{
-		Resources: lib.handleDescribeTopicResponse(resp),
+		Resources: incRequestResources,
 	})
 	if err != nil {
 		return errors.Wrapf(err, "failed to update topics config")
@@ -249,15 +256,21 @@ func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context, unprefixed
 // handleDescribeTopicResponse compare with lib cache topic config that
 // 1. generate incremental update request if lib cache exists and different with the describe response.
 // 2. save config to lib cache when there is no topic config.
-func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsResponse) []kafka.IncrementalAlterConfigsRequestResource {
+func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsResponse) ([]kafka.IncrementalAlterConfigsRequestResource, error) {
 	incReqResources := make([]kafka.IncrementalAlterConfigsRequestResource, 0, len(resp.Resources))
 	if resp == nil {
-		return incReqResources
+		return incReqResources, errors.Errorf("empty describe topic response")
 	}
 
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
+	respErrors := make([]error, 0)
 	for _, kTopicConfig := range resp.Resources {
+		if kTopicConfig.Error != nil {
+			respErrors = append(respErrors, kTopicConfig.Error)
+			continue
+		}
+
 		unprefixedTopicName := lib.removePrefix(kTopicConfig.ResourceName)
 		existTopicConfig, ok := lib.topicConfig[unprefixedTopicName]
 		if !ok { // if never set config, create empty config and fill it from kafka config later
@@ -270,7 +283,7 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsR
 		currentReqResource := kafka.IncrementalAlterConfigsRequestResource{
 			ResourceType: kafka.ResourceTypeTopic,
 			ResourceName: kTopicConfig.ResourceName,
-			Configs:      make([]kafka.IncrementalAlterConfigsRequestConfig, len(kTopicConfig.ConfigEntries)),
+			Configs:      make([]kafka.IncrementalAlterConfigsRequestConfig, 0, len(kTopicConfig.ConfigEntries)),
 		}
 
 		existConfigEntries := make(map[string]string, len(existTopicConfig.ConfigEntries))
@@ -303,7 +316,7 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsR
 		}
 		lib.topicConfig[unprefixedTopicName] = existTopicConfig
 	}
-	return incReqResources
+	return incReqResources, errors.Errorf("some describe response failed: %w", errors.Join(respErrors...))
 }
 
 // ValidateTopics will be fast whenever it can be fast. Sometimes it will

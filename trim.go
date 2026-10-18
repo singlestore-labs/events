@@ -14,19 +14,21 @@ import (
 // TrimExactlyOnceDeliveryRecords deletes exactly-once delivery records corresponding to messages that
 // should no longer exist in Kafka and thus won't be re-presented.
 //
-// The cutoff is the original topic's retention.ms + segment.ms,
-// plus the longest dead-letter retention.ms + segment.ms, plus marginMs.
+// The cutoff is the original topic's retention.ms + segment.ms plus
+// the longest dead-letter retention.ms + segment.ms, plus marginMs.
 // Those durations come from the configs Kafka reports, including for dead-letter topics created from the original.
 // The cutoff is measured against the database's clock.
 //
-// marginMs is extra time to keep records, in milliseconds.
+// margin is extra time to keep records, it should at least covers
+//   - the time difference of db and server that running the code
+//
 // batchSize is the number of rows deleted per statement.
 // batchInterval is the pause after a full batch. batchInterval == 0 does not pause.
 //
 // NOTE: Trim does not support topic with message.timestamp.type = "CreateTime", it skip trim those topic.
-func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Context, marginMs int64, batchSize int, batchInterval time.Duration) error {
-	if marginMs < 0 {
-		return errors.Errorf("trim margin %dms must not be negative", marginMs)
+func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Context, margin time.Duration, batchSize int, batchInterval time.Duration) error {
+	if margin < 0 {
+		return errors.Errorf("trim margin %s must not be negative", margin)
 	}
 	if batchSize <= 0 {
 		return errors.Errorf("trim batch size %d must be positive", batchSize)
@@ -114,14 +116,14 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 			continue
 		}
 
-		found := false
+		isLogAppendTime := false
 		for _, e := range original.ConfigEntries {
-			if e.ConfigName == "message.timestamp.type" && e.ConfigValue == "CreateTime" {
-				found = true
+			if e.ConfigName == "message.timestamp.type" && e.ConfigValue == "LogAppendTime" {
+				isLogAppendTime = true
 				continue // skip if it's CreateTime
 			}
 		}
-		if !found {
+		if !isLogAppendTime {
 			continue // skip if not found the timestamp type
 		}
 
@@ -166,17 +168,27 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 		if skip {
 			continue
 		}
-		if originalKeepMs > math.MaxInt64-longestDeadLetterMs-marginMs {
+
+		if originalKeepMs > math.MaxInt64-longestDeadLetterMs {
+			lib.logf(ctx, "[events] skip trim of topic %s, retention overflows", topic)
+			continue
+		}
+		keepMs := originalKeepMs + longestDeadLetterMs
+		if keepMs > int64((math.MaxInt64-margin)/time.Millisecond) {
 			lib.logf(ctx, "[events] skip trim of topic %s, retention plus margin overflows", topic)
 			continue
 		}
-		olderThanMs := originalKeepMs + longestDeadLetterMs + marginMs
-		deleted, err := lib.db.TrimEventsProcessed(ctx, topic, olderThanMs, batchSize, batchInterval)
+		keep := time.Duration(keepMs)*time.Millisecond + margin
+		// add a 26 hour (UTC+14, UTC-12) offset to cover most the timezone and server-client time difference.
+		// it's not guaranteed. Use 'margin' for extra.
+		keep += time.Hour * 26
+		cutoff := time.Now().Add(-keep)
+		deleted, err := lib.db.TrimEventsProcessed(ctx, topic, cutoff, batchSize, batchInterval)
 		if err != nil {
 			trimErrs = append(trimErrs, err)
 			continue
 		}
-		lib.logf(ctx, "[events] trimmed %d exactly-once records for topic %q older than %dms", deleted, topic, olderThanMs)
+		lib.logf(ctx, "[events] trimmed %d exactly-once records for topic %q older than %s", deleted, topic, keep)
 	}
 	return errors.Join(trimErrs...)
 }

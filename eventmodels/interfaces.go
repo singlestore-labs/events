@@ -115,7 +115,7 @@ type AbstractDB[ID AbstractID[ID], TX AbstractTX] interface {
 	// TrimEventsProcessed deletes rows whose processedAt is more than
 	// olderThanMs milliseconds before the database's current time.
 	// interval == 0 does not pause between full batches.
-	TrimEventsProcessed(ctx context.Context, topic string, olderThanMs int64, batchSize int, interval time.Duration) (int64, error)
+	TrimEventsProcessed(ctx context.Context, topic string, olderThan time.Time, batchSize int, interval time.Duration) (int64, error)
 }
 
 const ErrAlreadyProcessed errors.String = "event already processed"
