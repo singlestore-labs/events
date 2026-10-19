@@ -27,6 +27,9 @@ const (
 	produceFromTableBuffer = 512
 	minimumLockAttemptTime = 100 * time.Millisecond // DB BEGIN + SELECT FOR UPDATE
 	foreverLockAttemptTime = time.Minute * 2
+	// trimCutoffOffset is extra time TrimEventsProcessed keeps records. processedAt is a DATETIME
+	// without a time zone, so this covers the widest time zone gap (UTC+14 to UTC-12).
+	trimCutoffOffset = 26 * time.Hour
 )
 
 var debugging = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
@@ -140,21 +143,23 @@ func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
 }
 
-func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, olderThan time.Time, batchSize int, batchInterval time.Duration) (int64, error) {
+func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, cutoff time.Time, batchSize int, batchInterval time.Duration) (int64, error) {
 	if batchSize <= 0 {
 		return 0, errors.Errorf("trim batch size %d must be positive", batchSize)
 	}
 	if batchInterval < 0 {
 		return 0, errors.Errorf("trim batch interval %s must not be negative", batchInterval)
 	}
+	// processedAt is written by NOW() in the cluster's time zone.
+	cutoff = cutoff.Add(-trimCutoffOffset)
 	var total int64
 	for {
 		result, err := c.ExecContext(ctx, `
 			DELETE FROM eventsProcessed
-			WHERE topic = ? AND processedAt < FROM_UNIXTIME(?)
+			WHERE topic = ? AND processedAt < ?
 			ORDER BY processedAt
 			LIMIT ?`,
-			topic, olderThan.Unix(), batchSize)
+			topic, cutoff, batchSize)
 		if err != nil {
 			return total, errors.Errorf("could not trim processed events for topic (%s): %w", topic, err)
 		}

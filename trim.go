@@ -14,13 +14,17 @@ import (
 // TrimExactlyOnceDeliveryRecords deletes exactly-once delivery records corresponding to messages that
 // should no longer exist in Kafka and thus won't be re-presented.
 //
-// The cutoff is the original topic's retention.ms + segment.ms plus
-// the longest dead-letter retention.ms + segment.ms, plus marginMs.
+// Records are kept in the duration of
+// - the original topic's retention.ms + segment.ms,
+// - the longest dead-letter retention.ms + segment.ms,
+// - the broker's log.retention.check.interval.ms,
+// - margin.
 // Those durations come from the configs Kafka reports, including for dead-letter topics created from the original.
-// The cutoff is measured against the database's clock.
+// The cutoff is measured against the clock of the server running this code,
 //
-// margin is extra time to keep records, it should at least covers
-//   - the time difference of db and server that running the code
+// margin is extra time to keep records. It could help to cover some edge cases
+// - clock differences between the Kafka brokers and the database.
+// - database client and server time difference
 //
 // batchSize is the number of rows deleted per statement.
 // batchInterval is the pause after a full batch. batchInterval == 0 does not pause.
@@ -103,6 +107,10 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 	for _, resource := range resp.Resources {
 		unprefixedDescribed[lib.removePrefix(resource.ResourceName)] = resource
 	}
+	checkIntervalMs, err := lib.retentionCheckIntervalMs(ctx)
+	if err != nil {
+		return err
+	}
 
 	trimErrs := make([]error, 0)
 	for topic, deadLetters := range exactlyOnceUnprefixedTopics {
@@ -169,19 +177,16 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 			continue
 		}
 
-		if originalKeepMs > math.MaxInt64-longestDeadLetterMs {
+		if originalKeepMs > math.MaxInt64-longestDeadLetterMs-checkIntervalMs {
 			lib.logf(ctx, "[events] skip trim of topic %s, retention overflows", topic)
 			continue
 		}
-		keepMs := originalKeepMs + longestDeadLetterMs
+		keepMs := originalKeepMs + longestDeadLetterMs + checkIntervalMs
 		if keepMs > int64((math.MaxInt64-margin)/time.Millisecond) {
 			lib.logf(ctx, "[events] skip trim of topic %s, retention plus margin overflows", topic)
 			continue
 		}
 		keep := time.Duration(keepMs)*time.Millisecond + margin
-		// add a 26 hour (UTC+14, UTC-12) offset to cover most the timezone and server-client time difference.
-		// it's not guaranteed. Use 'margin' for extra.
-		keep += time.Hour * 26
 		cutoff := time.Now().Add(-keep)
 		deleted, err := lib.db.TrimEventsProcessed(ctx, topic, cutoff, batchSize, batchInterval)
 		if err != nil {
@@ -191,6 +196,54 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 		lib.logf(ctx, "[events] trimmed %d exactly-once records for topic %q older than %s", deleted, topic, keep)
 	}
 	return errors.Join(trimErrs...)
+}
+
+// retentionCheckIntervalMs returns the controller's log.retention.check.interval.ms. Kafka only
+// deletes expired segments when that check runs, so a message can stay readable for up to this long
+// after its segment has passed retention.ms. Kafka reports the effective value, which is the
+// default (300000) when the broker never set it.
+// https://kafka.apache.org/documentation/#brokerconfigs_log.retention.check.interval.ms
+func (lib *LibraryNoDB) retentionCheckIntervalMs(ctx context.Context) (int64, error) {
+	const configName = "log.retention.check.interval.ms"
+	client, err := lib.getController(ctx)
+	if err != nil {
+		return 0, errors.Errorf("event library could not get kafka controller: %w", err)
+	}
+	// A broker only describes its own broker configs, so ask the controller about itself.
+	meta, err := client.Metadata(ctx, &kafka.MetadataRequest{})
+	if err != nil {
+		return 0, errors.Errorf("could not get kafka metadata: %w", err)
+	}
+	resp, err := client.DescribeConfigs(ctx, &kafka.DescribeConfigsRequest{
+		Resources: []kafka.DescribeConfigRequestResource{{
+			ResourceType: kafka.ResourceTypeBroker,
+			ResourceName: strconv.Itoa(meta.Controller.ID),
+			ConfigNames:  []string{configName},
+		}},
+	})
+	if err != nil {
+		return 0, errors.Errorf("could not describe broker config %s: %w", configName, err)
+	}
+
+	for _, resource := range resp.Resources {
+		if resource.Error != nil {
+			return 0, errors.Errorf("could not describe broker config %s: %w", configName, resource.Error)
+		}
+		for _, entry := range resource.ConfigEntries {
+			if entry.ConfigName != configName {
+				continue
+			}
+			ms, err := strconv.ParseInt(entry.ConfigValue, 10, 64)
+			if err != nil {
+				return 0, errors.Errorf("broker config %s value %q: %w", configName, entry.ConfigValue, err)
+			}
+			if ms < 0 {
+				return 0, errors.Errorf("broker config %s value %d must not be negative", configName, ms)
+			}
+			return ms, nil
+		}
+	}
+	return 0, errors.Errorf("broker config %s is missing", configName)
 }
 
 // topicRetentionAndSegmentMs returns retention.ms + segment.ms. A negative result means no time limit.

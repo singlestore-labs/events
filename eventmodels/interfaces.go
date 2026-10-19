@@ -112,10 +112,10 @@ type AbstractDB[ID AbstractID[ID], TX AbstractTX] interface {
 	// be used by MarkEventProcessed, it is a DB method for simplicity of wrapping.
 	MarkEventProcessed(ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error
 
-	// TrimEventsProcessed deletes rows whose processedAt is more than
-	// olderThanMs milliseconds before the database's current time.
+	// TrimEventsProcessed deletes rows whose processedAt is before cutoff. Implementations
+	// may move cutoff earlier to cover clock and time zone differences with the database.
 	// interval == 0 does not pause between full batches.
-	TrimEventsProcessed(ctx context.Context, topic string, olderThan time.Time, batchSize int, interval time.Duration) (int64, error)
+	TrimEventsProcessed(ctx context.Context, topic string, cutoff time.Time, batchSize int, interval time.Duration) (int64, error)
 }
 
 const ErrAlreadyProcessed errors.String = "event already processed"
