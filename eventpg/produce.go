@@ -18,8 +18,13 @@ import (
 	"github.com/singlestore-labs/events"
 	"github.com/singlestore-labs/events/eventdb"
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/events/internal"
 	"github.com/singlestore-labs/generic"
 )
+
+// trimCutoffOffset is extra time TrimEventsProcessed keeps records. processedAt is a timestamp
+// with time zone, so this only needs to cover clock differences between this server and the database.
+const trimCutoffOffset = time.Hour
 
 var debugging = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
 
@@ -76,6 +81,43 @@ func (c *Connection[TX, DB]) ProduceDroppedTxEvents(ctx context.Context, batchSi
 
 func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
+}
+
+func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, cutoff time.Time, batchSize int, batchInterval time.Duration) (int64, error) {
+	if batchSize <= 0 {
+		return 0, errors.Errorf("trim batch size %d must be positive", batchSize)
+	}
+	if batchInterval < 0 {
+		return 0, errors.Errorf("trim batch interval %s must not be negative", batchInterval)
+	}
+	cutoff = cutoff.Add(-trimCutoffOffset)
+	var total int64
+	for {
+		result, err := c.ExecContext(ctx, `
+			DELETE FROM eventsProcessed
+			WHERE (topic, source, id, handlerName) IN (
+				SELECT topic, source, id, handlerName
+				FROM eventsProcessed
+				WHERE topic = $1 AND processedAt < $2
+				ORDER BY processedAt
+				LIMIT $3
+			)`,
+			topic, cutoff, batchSize)
+		if err != nil {
+			return total, errors.Errorf("could not trim processed events for topic (%s): %w", topic, err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return total, errors.Errorf("could not trim processed events for topic (%s): %w", topic, err)
+		}
+		total += rows
+		if rows < int64(batchSize) {
+			return total, nil
+		}
+		if err := internal.Sleep(ctx, batchInterval); err != nil {
+			return total, err
+		}
+	}
 }
 
 func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.StringEventID, error) {
@@ -359,6 +401,11 @@ func Migrations(database *libschema.Database) {
 			);
 
 			COMMENT ON TABLE eventsProcessed IS 'persistent data to track exactly-once consumer deliveries';
+			`),
+
+		lspostgres.Script("create-eventsProcessed-topic-processedAt-index", `
+			CREATE INDEX IF NOT EXISTS eventsProcessed_topic_processedAt_idx
+			ON eventsProcessed (topic, processedAt);
 			`),
 	)
 }

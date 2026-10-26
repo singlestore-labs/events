@@ -19,6 +19,7 @@ import (
 	"github.com/singlestore-labs/events"
 	"github.com/singlestore-labs/events/eventdb"
 	"github.com/singlestore-labs/events/eventmodels"
+	"github.com/singlestore-labs/events/internal"
 	"github.com/singlestore-labs/generic"
 )
 
@@ -26,6 +27,9 @@ const (
 	produceFromTableBuffer = 512
 	minimumLockAttemptTime = 100 * time.Millisecond // DB BEGIN + SELECT FOR UPDATE
 	foreverLockAttemptTime = time.Minute * 2
+	// trimCutoffOffset is extra time TrimEventsProcessed keeps records. processedAt is a DATETIME
+	// without a time zone, so this covers the widest time zone gap (UTC+14 to UTC-12).
+	trimCutoffOffset = 26 * time.Hour
 )
 
 var debugging = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
@@ -87,6 +91,13 @@ func Migrations(database *libschema.Database, singlestore *lssinglestore.SingleS
 				SHARD KEY	(topic, source, id, handlerName)
 			)
 			COMMENT 'persistent data to track exactly-once consumer deliveries'`),
+
+		lssinglestore.Script("create-eventsProcessed-topic-processedAt-index", `
+			CREATE INDEX eventsProcessed_topic_processedAt_idx ON eventsProcessed (topic, processedAt)`,
+			libschema.SkipIf(func() (bool, error) {
+				return singlestore.TableHasIndex("eventsProcessed", "eventsProcessed_topic_processedAt_idx")
+			}),
+		),
 	)
 }
 
@@ -130,6 +141,40 @@ func (c *Connection[TX, DB]) ProduceDroppedTxEvents(ctx context.Context, batchSi
 
 func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
+}
+
+func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, cutoff time.Time, batchSize int, batchInterval time.Duration) (int64, error) {
+	if batchSize <= 0 {
+		return 0, errors.Errorf("trim batch size %d must be positive", batchSize)
+	}
+	if batchInterval < 0 {
+		return 0, errors.Errorf("trim batch interval %s must not be negative", batchInterval)
+	}
+	// processedAt is written by NOW() in the cluster's time zone.
+	cutoff = cutoff.Add(-trimCutoffOffset)
+	var total int64
+	for {
+		result, err := c.ExecContext(ctx, `
+			DELETE FROM eventsProcessed
+			WHERE topic = ? AND processedAt < ?
+			ORDER BY processedAt
+			LIMIT ?`,
+			topic, cutoff, batchSize)
+		if err != nil {
+			return total, errors.Errorf("could not trim processed events for topic (%s): %w", topic, err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return total, errors.Errorf("could not trim processed events for topic (%s): %w", topic, err)
+		}
+		total += rows
+		if rows < int64(batchSize) {
+			return total, nil
+		}
+		if err := internal.Sleep(ctx, batchInterval); err != nil {
+			return total, err
+		}
+	}
 }
 
 func (c Connection[TX, DB]) SaveEventsInsideTx(ctx context.Context, tx TX, events ...eventmodels.ProducingEvent) (map[string][]eventmodels.BinaryEventID, error) {
