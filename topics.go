@@ -316,7 +316,7 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsR
 		}
 		lib.topicConfig[unprefixedTopicName] = existTopicConfig
 	}
-	return incReqResources, errors.Errorf("some describe response failed: %w", errors.Join(respErrors...))
+	return incReqResources, errors.Wrap(errors.Join(respErrors...), "some describe response failed")
 }
 
 // ValidateTopics will be fast whenever it can be fast. Sometimes it will
