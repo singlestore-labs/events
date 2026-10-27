@@ -27,9 +27,9 @@ const (
 	produceFromTableBuffer = 512
 	minimumLockAttemptTime = 100 * time.Millisecond // DB BEGIN + SELECT FOR UPDATE
 	foreverLockAttemptTime = time.Minute * 2
-	// trimCutoffOffset is extra time TrimEventsProcessed keeps records. processedAt is a DATETIME
+	// trimOffset is extra time TrimEventsProcessed keeps records. processedAt is a DATETIME
 	// without a time zone, so this covers the widest time zone gap (UTC+14 to UTC-12).
-	trimCutoffOffset = 26 * time.Hour
+	trimOffset = 26 * time.Hour
 )
 
 var debugging = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
@@ -143,15 +143,15 @@ func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
 }
 
-func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, cutoff time.Time, batchSize int, batchInterval time.Duration) (int64, error) {
+func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, trimOlderThan time.Time, batchSize int, betweenBatchPause time.Duration) (int64, error) {
 	if batchSize <= 0 {
 		return 0, errors.Errorf("trim batch size %d must be positive", batchSize)
 	}
-	if batchInterval < 0 {
-		return 0, errors.Errorf("trim batch interval %s must not be negative", batchInterval)
+	if betweenBatchPause < 0 {
+		return 0, errors.Errorf("trim batch interval %s must not be negative", betweenBatchPause)
 	}
 	// processedAt is written by NOW() in the cluster's time zone.
-	cutoff = cutoff.Add(-trimCutoffOffset)
+	trimOlderThan = trimOlderThan.Add(-trimOffset)
 	var total int64
 	for {
 		result, err := c.ExecContext(ctx, `
@@ -159,7 +159,7 @@ func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic strin
 			WHERE topic = ? AND processedAt < ?
 			ORDER BY processedAt
 			LIMIT ?`,
-			topic, cutoff, batchSize)
+			topic, trimOlderThan, batchSize)
 		if err != nil {
 			return total, errors.Errorf("could not trim processed events for topic (%s): %w", topic, err)
 		}
@@ -171,7 +171,7 @@ func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic strin
 		if rows < int64(batchSize) {
 			return total, nil
 		}
-		if err := internal.Sleep(ctx, batchInterval); err != nil {
+		if err := internal.Sleep(ctx, betweenBatchPause); err != nil {
 			return total, err
 		}
 	}

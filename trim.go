@@ -81,7 +81,7 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 	// Use the original topic's config only when the dead-letter topic has none.
 	for original, deadLetters := range exactlyOnceUnprefixedTopics {
 		for _, deadLetter := range deadLetters {
-			lib.setUpDeadLetterTopicConfigHelper(original, deadLetter)
+			lib.setupDeadLetterTopicConfigHelper(original, deadLetter)
 		}
 	}
 
@@ -187,8 +187,8 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 			continue
 		}
 		keep := time.Duration(keepMs)*time.Millisecond + margin
-		cutoff := time.Now().Add(-keep)
-		deleted, err := lib.db.TrimEventsProcessed(ctx, topic, cutoff, batchSize, batchInterval)
+		trimOlderThan := time.Now().Add(-keep)
+		deleted, err := lib.db.TrimEventsProcessed(ctx, topic, trimOlderThan, batchSize, batchInterval)
 		if err != nil {
 			trimErrs = append(trimErrs, err)
 			continue

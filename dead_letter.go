@@ -45,7 +45,7 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(startupCtx context.Cont
 		dlTopic := DeadLetterTopic(topic, consumerGroup)
 		preCreate = append(preCreate, dlTopic)
 		// Use the original topic's config only when the dead-letter topic has none.
-		lib.setUpDeadLetterTopicConfigHelper(topic, dlTopic)
+		lib.setupDeadLetterTopicConfigHelper(topic, dlTopic)
 	}
 	if len(preCreate) == 0 {
 		return

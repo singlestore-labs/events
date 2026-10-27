@@ -73,7 +73,7 @@ func (lib *LibraryNoDB) getTopicConfig(unprefixedTopic string) (kafka.TopicConfi
 // UpdateTopicConfigs updates every topic registered in topicConfig.
 // If a topic doesn't already exist, it will be created.
 //
-// Side effect: topic configs will be cached and configs in Kafka will not be re-checked.
+// Side effect: topic configs in Kafka will be cached and configs in Kafka will not be re-checked on subsequent calls.
 func (lib *LibraryNoDB) UpdateTopicConfigs(ctx context.Context) (err error) {
 	topics := func() []string {
 		lib.lock.Lock()
@@ -145,7 +145,7 @@ func (lib *LibraryNoDB) getOrDefaultConfig(unprefixedTopic string) kafka.TopicCo
 	return tc
 }
 
-func (lib *LibraryNoDB) setUpDeadLetterTopicConfigHelper(topic, deadLetterTopic string) {
+func (lib *LibraryNoDB) setupDeadLetterTopicConfigHelper(topic, deadLetterTopic string) {
 	if _, ok := lib.getTopicConfig(deadLetterTopic); !ok {
 		if config, ok := lib.getTopicConfig(topic); ok {
 			config.Topic = deadLetterTopic
@@ -262,8 +262,6 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsR
 		return incReqResources, errors.Errorf("empty describe topic response")
 	}
 
-	lib.lock.Lock()
-	defer lib.lock.Unlock()
 	respErrors := make([]error, 0)
 	for _, kTopicConfig := range resp.Resources {
 		if kTopicConfig.Error != nil {
@@ -272,9 +270,12 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsR
 		}
 
 		unprefixedTopicName := lib.removePrefix(kTopicConfig.ResourceName)
-		existTopicConfig, ok := lib.topicConfig[unprefixedTopicName]
+
+		lib.lock.Lock()
+		defer lib.lock.Unlock()
+		existingTopicConfig, ok := lib.topicConfig[unprefixedTopicName]
 		if !ok { // if never set config, create empty config and fill it from kafka config later
-			existTopicConfig = kafka.TopicConfig{
+			existingTopicConfig = kafka.TopicConfig{
 				Topic:         unprefixedTopicName,
 				ConfigEntries: make([]kafka.ConfigEntry, 0, len(kTopicConfig.ConfigEntries)),
 			}
@@ -286,8 +287,8 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsR
 			Configs:      make([]kafka.IncrementalAlterConfigsRequestConfig, 0, len(kTopicConfig.ConfigEntries)),
 		}
 
-		existConfigEntries := make(map[string]string, len(existTopicConfig.ConfigEntries))
-		for _, entry := range existTopicConfig.ConfigEntries {
+		existConfigEntries := make(map[string]string, len(existingTopicConfig.ConfigEntries))
+		for _, entry := range existingTopicConfig.ConfigEntries {
 			existConfigEntries[entry.ConfigName] = entry.ConfigValue
 		}
 
@@ -305,7 +306,7 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsR
 				// skip if same value
 			} else {
 				// else, not set, don't change kafka, save value to cache
-				existTopicConfig.ConfigEntries = append(existTopicConfig.ConfigEntries, kafka.ConfigEntry{
+				existingTopicConfig.ConfigEntries = append(existingTopicConfig.ConfigEntries, kafka.ConfigEntry{
 					ConfigName:  entry.ConfigName,
 					ConfigValue: entry.ConfigValue,
 				})
@@ -314,7 +315,7 @@ func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsR
 		if len(currentReqResource.Configs) > 0 {
 			incReqResources = append(incReqResources, currentReqResource)
 		}
-		lib.topicConfig[unprefixedTopicName] = existTopicConfig
+		lib.topicConfig[unprefixedTopicName] = existingTopicConfig
 	}
 	return incReqResources, errors.Wrap(errors.Join(respErrors...), "some describe response failed")
 }

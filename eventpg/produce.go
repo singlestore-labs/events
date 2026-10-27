@@ -22,9 +22,9 @@ import (
 	"github.com/singlestore-labs/generic"
 )
 
-// trimCutoffOffset is extra time TrimEventsProcessed keeps records. processedAt is a timestamp
+// trimOffset is extra time TrimEventsProcessed keeps records. processedAt is a timestamp
 // with time zone, so this only needs to cover clock differences between this server and the database.
-const trimCutoffOffset = time.Hour
+const trimOffset = time.Hour
 
 var debugging = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
 
@@ -83,14 +83,14 @@ func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic
 	return MarkEventProcessed[TX](ctx, tx, topic, source, id, handlerName)
 }
 
-func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, cutoff time.Time, batchSize int, batchInterval time.Duration) (int64, error) {
+func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic string, trimOlderThan time.Time, batchSize int, betweenBatchPause time.Duration) (int64, error) {
 	if batchSize <= 0 {
 		return 0, errors.Errorf("trim batch size %d must be positive", batchSize)
 	}
-	if batchInterval < 0 {
-		return 0, errors.Errorf("trim batch interval %s must not be negative", batchInterval)
+	if betweenBatchPause < 0 {
+		return 0, errors.Errorf("trim batch interval %s must not be negative", betweenBatchPause)
 	}
-	cutoff = cutoff.Add(-trimCutoffOffset)
+	trimOlderThan = trimOlderThan.Add(-trimOffset)
 	var total int64
 	for {
 		result, err := c.ExecContext(ctx, `
@@ -102,7 +102,7 @@ func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic strin
 				ORDER BY processedAt
 				LIMIT $3
 			)`,
-			topic, cutoff, batchSize)
+			topic, trimOlderThan, batchSize)
 		if err != nil {
 			return total, errors.Errorf("could not trim processed events for topic (%s): %w", topic, err)
 		}
@@ -114,7 +114,7 @@ func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic strin
 		if rows < int64(batchSize) {
 			return total, nil
 		}
-		if err := internal.Sleep(ctx, batchInterval); err != nil {
+		if err := internal.Sleep(ctx, betweenBatchPause); err != nil {
 			return total, err
 		}
 	}
