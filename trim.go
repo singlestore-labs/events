@@ -3,7 +3,9 @@ package events
 import (
 	"context"
 	"math"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/memsql/errors"
@@ -169,7 +171,7 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 			continue
 		}
 		if originalKeepMs < 0 {
-			lib.logf(ctx, "[events] skip trim of topic %s, retention.ms or segment.ms is unlimited", unprefixedTopic)
+			lib.logf(ctx, "[events] skip trim of topic %s, retention.ms or segment.ms is unlimited or cleanup.policy has no delete", unprefixedTopic)
 			continue
 		}
 		var longestDeadLetterMs int64
@@ -188,7 +190,7 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 				break
 			}
 			if deadLetterKeepMs < 0 {
-				lib.logf(ctx, "[events] skip trim of topic %s, dead letter topic %s retention.ms or segment.ms is unlimited", unprefixedTopic, unprefixedDeadLetter)
+				lib.logf(ctx, "[events] skip trim of topic %s, dead letter topic %s retention.ms or segment.ms is unlimited or cleanup.policy has no delete", unprefixedTopic, unprefixedDeadLetter)
 				skip = true
 				break
 			}
@@ -226,6 +228,9 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 // after its segment has passed retention.ms. Kafka reports the effective value, which is the
 // default (300000) when the broker never set it.
 // https://kafka.apache.org/documentation/#brokerconfigs_log.retention.check.interval.ms
+//
+// multiple brokers could have different intervals but it's very rare.
+// And an solve by include the largest interval in margin time.
 func (lib *LibraryNoDB) retentionCheckIntervalMs(ctx context.Context) (int64, error) {
 	const configName = "log.retention.check.interval.ms"
 	client, err := lib.getController(ctx)
@@ -269,10 +274,19 @@ func (lib *LibraryNoDB) retentionCheckIntervalMs(ctx context.Context) (int64, er
 	return 0, errors.Errorf("broker config %s is missing", configName)
 }
 
-// topicRetentionAndSegmentMs returns retention.ms + segment.ms. A negative result means no time limit.
+// topicRetentionAndSegmentMs returns retention.ms + segment.ms. A negative result means no time limit,
+// which includes a cleanup.policy without delete because compacted messages are kept regardless of age.
+// https://kafka.apache.org/documentation/#topicconfigs_cleanup.policy
 // https://kafka.apache.org/documentation/#topicconfigs_retention.ms
 // https://kafka.apache.org/documentation/#topicconfigs_segment.ms
 func topicRetentionAndSegmentMs(entries []kafka.DescribeConfigResponseConfigEntry) (int64, error) {
+	policyIndex := slices.IndexFunc(entries, func(e kafka.DescribeConfigResponseConfigEntry) bool { return e.ConfigName == "cleanup.policy" })
+	if policyIndex < 0 {
+		return 0, errors.Errorf("topic config cleanup.policy is missing")
+	}
+	if !slices.ContainsFunc(strings.Split(entries[policyIndex].ConfigValue, ","), func(p string) bool { return strings.TrimSpace(p) == "delete" }) {
+		return -1, nil
+	}
 	configMs := func(name string) (int64, error) {
 		for _, entry := range entries {
 			if entry.ConfigName != name {
