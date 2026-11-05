@@ -157,7 +157,6 @@ func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic strin
 		result, err := c.ExecContext(ctx, `
 			DELETE FROM eventsProcessed
 			WHERE topic = ? AND processedAt < ?
-			ORDER BY processedAt
 			LIMIT ?`,
 			topic, trimOlderThan, batchSize)
 		if err != nil {
