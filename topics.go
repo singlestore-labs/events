@@ -70,10 +70,40 @@ func (lib *LibraryNoDB) getTopicConfig(unprefixedTopic string) (kafka.TopicConfi
 	return c, ok
 }
 
+// setKafkaTopicConfig records the configs Kafka reported, keyed by unprefixed topic.
+// Resource names are prefixed. Resources with errors are skipped.
+func (lib *LibraryNoDB) setKafkaTopicConfig(resources []kafka.DescribeConfigResponseResource) {
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	for _, r := range resources {
+		if r.Error != nil {
+			continue
+		}
+		lib.kafkaTopicConfig[lib.removePrefix(r.ResourceName)] = r.ConfigEntries
+	}
+}
+
+// deleteKafkaTopicConfig forgets the configs Kafka reported for resources whose state is unknown.
+// Resource names are prefixed.
+func (lib *LibraryNoDB) deleteKafkaTopicConfig(resources []kafka.IncrementalAlterConfigsRequestResource) {
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	for _, r := range resources {
+		delete(lib.kafkaTopicConfig, lib.removePrefix(r.ResourceName))
+	}
+}
+
+// getKafkaTopicConfig returns the configs Kafka last reported. The result must not be modified.
+func (lib *LibraryNoDB) getKafkaTopicConfig(unprefixedTopic string) ([]kafka.DescribeConfigResponseConfigEntry, bool) {
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	c, ok := lib.kafkaTopicConfig[unprefixedTopic]
+	return c, ok
+}
+
 // UpdateTopicConfigs updates every topic registered in topicConfig.
 // If a topic doesn't already exist, it will be created.
-//
-// Side effect: topic configs in Kafka will be cached and configs in Kafka will not be re-checked on subsequent calls.
+// Configs that were not set with SetTopicConfig are left as they are in Kafka.
 func (lib *LibraryNoDB) UpdateTopicConfigs(ctx context.Context) (err error) {
 	topics := func() []string {
 		lib.lock.Lock()
@@ -188,7 +218,7 @@ func (lib *LibraryNoDB) createTopics(ctx context.Context, unprefixedTopics []str
 }
 
 // describeTopicConfigs reads topic configuration from Kafka.
-// The response will have prefixedTopics
+// The response will have prefixedTopics. Errors for individual topics are in each resource's Error.
 func (lib *LibraryNoDB) describeTopicConfigs(ctx context.Context, unprefixedTopics []string) (*kafka.DescribeConfigsResponse, error) {
 	client, err := lib.getController(ctx)
 	if err != nil {
@@ -209,16 +239,10 @@ func (lib *LibraryNoDB) describeTopicConfigs(ctx context.Context, unprefixedTopi
 	if err != nil {
 		return nil, errors.Wrapf(err, "could not get topics config from kafka")
 	}
-	respErrors := make([]error, 0)
-	for _, r := range resp.Resources {
-		if r.Error != nil {
-			respErrors = append(respErrors, r.Error)
-		}
-	}
-	return resp, errors.Join(respErrors...)
+	return resp, nil
 }
 
-// syncTopicConfigFromKafka describes topics and applies the cached config where it differs.
+// syncTopicConfigFromKafka describes topics and applies the configs set with SetTopicConfig where Kafka differs.
 func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context, unprefixedTopics []string) error {
 	if len(unprefixedTopics) == 0 {
 		return nil
@@ -227,97 +251,74 @@ func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context, unprefixed
 	if err != nil {
 		return err
 	}
-	if resp == nil {
-		return errors.Errorf("failed to describe topics-%v, nil response", unprefixedTopics)
+	incRequestResources, describeErr := lib.generateKafkaUpdateRequests(resp)
+	if len(incRequestResources) == 0 {
+		return describeErr
 	}
+
 	client, err := lib.getController(ctx)
 	if err != nil {
-		return errors.Errorf("event library could not get kafka controller: %w", err)
+		return errors.Join(describeErr, errors.Errorf("event library could not get kafka controller: %w", err))
 	}
-
-	incRequestResources, err := lib.handleDescribeTopicResponse(resp)
-	if err != nil {
-		return err
-	}
-
 	updateResp, err := client.IncrementalAlterConfigs(ctx, &kafka.IncrementalAlterConfigsRequest{
 		Resources: incRequestResources,
 	})
+	// Kafka's configs for these topics may have changed, even if the request failed.
+	// They are described again when next needed.
+	lib.deleteKafkaTopicConfig(incRequestResources)
 	if err != nil {
-		return errors.Wrapf(err, "failed to update topics config")
+		return errors.Join(describeErr, errors.Wrapf(err, "failed to update topics config"))
 	}
-	topicUpdateErrors := make([]error, 0, len(unprefixedTopics))
-	for _, resp := range updateResp.Resources {
-		topicUpdateErrors = append(topicUpdateErrors, errors.Wrapf(resp.Error, "failed update topic-%s", resp.ResourceName))
+	topicUpdateErrors := []error{describeErr}
+	for _, r := range updateResp.Resources {
+		if r.Error != nil {
+			topicUpdateErrors = append(topicUpdateErrors, errors.Wrapf(r.Error, "failed update topic-%s", r.ResourceName))
+		}
 	}
 	return errors.Join(topicUpdateErrors...)
 }
 
-// handleDescribeTopicResponse compare with lib cache topic config that
-// 1. generate incremental update request if lib cache exists and different with the describe response.
-// 2. save config to lib cache when there is no topic config.
-func (lib *LibraryNoDB) handleDescribeTopicResponse(resp *kafka.DescribeConfigsResponse) ([]kafka.IncrementalAlterConfigsRequestResource, error) {
-	incReqResources := make([]kafka.IncrementalAlterConfigsRequestResource, 0, len(resp.Resources))
+// generateKafkaUpdateRequests records the configs Kafka reported and returns the changes needed
+// to make Kafka match the configs set with SetTopicConfig. Configs only Kafka has are left alone.
+func (lib *LibraryNoDB) generateKafkaUpdateRequests(resp *kafka.DescribeConfigsResponse) ([]kafka.IncrementalAlterConfigsRequestResource, error) {
 	if resp == nil {
-		return incReqResources, errors.Errorf("empty describe topic response")
+		return nil, errors.Errorf("empty describe topic response")
 	}
+	lib.setKafkaTopicConfig(resp.Resources)
 
+	incReqResources := make([]kafka.IncrementalAlterConfigsRequestResource, 0, len(resp.Resources))
 	respErrors := make([]error, 0)
 	for _, kTopicConfig := range resp.Resources {
 		if kTopicConfig.Error != nil {
-			respErrors = append(respErrors, kTopicConfig.Error)
+			respErrors = append(respErrors, errors.Wrapf(kTopicConfig.Error, "could not describe topic %s", kTopicConfig.ResourceName))
 			continue
 		}
-
-		unprefixedTopicName := lib.removePrefix(kTopicConfig.ResourceName)
-
-		lib.lock.Lock()
-		defer lib.lock.Unlock()
-		existingTopicConfig, ok := lib.topicConfig[unprefixedTopicName]
-		if !ok { // if never set config, create empty config and fill it from kafka config later
-			existingTopicConfig = kafka.TopicConfig{
-				Topic:         unprefixedTopicName,
-				ConfigEntries: make([]kafka.ConfigEntry, 0, len(kTopicConfig.ConfigEntries)),
-			}
-		}
-
-		currentReqResource := kafka.IncrementalAlterConfigsRequestResource{
-			ResourceType: kafka.ResourceTypeTopic,
-			ResourceName: kTopicConfig.ResourceName,
-			Configs:      make([]kafka.IncrementalAlterConfigsRequestConfig, 0, len(kTopicConfig.ConfigEntries)),
-		}
-
-		existConfigEntries := make(map[string]string, len(existingTopicConfig.ConfigEntries))
-		for _, entry := range existingTopicConfig.ConfigEntries {
-			existConfigEntries[entry.ConfigName] = entry.ConfigValue
-		}
-
+		kafkaValues := make(map[string]string, len(kTopicConfig.ConfigEntries))
 		for _, entry := range kTopicConfig.ConfigEntries {
-			// if exist, add to incrementalAlterConfig
-			if existValue, ok := existConfigEntries[entry.ConfigName]; ok {
-				if entry.ConfigValue != existValue {
-					currentReqResource.Configs = append(currentReqResource.Configs,
-						kafka.IncrementalAlterConfigsRequestConfig{
-							Name:            entry.ConfigName,
-							Value:           existValue,
-							ConfigOperation: kafka.ConfigOperationSet,
-						})
-				}
-				// skip if same value
-			} else {
-				// else, not set, don't change kafka, save value to cache
-				existingTopicConfig.ConfigEntries = append(existingTopicConfig.ConfigEntries, kafka.ConfigEntry{
-					ConfigName:  entry.ConfigName,
-					ConfigValue: entry.ConfigValue,
-				})
+			kafkaValues[entry.ConfigName] = entry.ConfigValue
+		}
+
+		wantConfig, _ := lib.getTopicConfig(lib.removePrefix(kTopicConfig.ResourceName))
+		var incConfigs []kafka.IncrementalAlterConfigsRequestConfig
+		for _, want := range wantConfig.ConfigEntries {
+			if have, ok := kafkaValues[want.ConfigName]; ok && have == want.ConfigValue {
+				continue
 			}
+			incConfigs = append(incConfigs, kafka.IncrementalAlterConfigsRequestConfig{
+				Name:            want.ConfigName,
+				Value:           want.ConfigValue,
+				ConfigOperation: kafka.ConfigOperationSet,
+			})
 		}
-		if len(currentReqResource.Configs) > 0 {
-			incReqResources = append(incReqResources, currentReqResource)
+		if len(incConfigs) > 0 {
+			incReqResources = append(incReqResources, kafka.IncrementalAlterConfigsRequestResource{
+				ResourceType: kafka.ResourceTypeTopic,
+				ResourceName: kTopicConfig.ResourceName,
+				Configs:      incConfigs,
+			})
 		}
-		lib.topicConfig[unprefixedTopicName] = existingTopicConfig
 	}
-	return incReqResources, errors.Wrap(errors.Join(respErrors...), "some describe response failed")
+	return incReqResources, errors.Join(respErrors...)
 }
 
 // ValidateTopics will be fast whenever it can be fast. Sometimes it will

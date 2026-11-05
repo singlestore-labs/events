@@ -22,6 +22,10 @@ import (
 // Those durations come from the configs Kafka reports, including for dead-letter topics created from the original.
 // The cutoff is measured against the clock of the server running this code,
 //
+// Topic configs come from the last UpdateTopicConfigs call or an earlier trim; topics without
+// them are described from Kafka. Configs changed directly in Kafka are not seen until
+// UpdateTopicConfigs runs again.
+//
 // margin is extra time to keep records. It could help to cover some edge cases
 // - clock differences between the Kafka brokers and the database.
 // - database client and server time difference
@@ -99,13 +103,39 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 		return err
 	}
 
-	resp, err := lib.describeTopicConfigs(ctx, unprefixedTopicNames)
-	if err != nil {
-		return err
+	unprefixedTopicConfigs := make(map[string][]kafka.DescribeConfigResponseConfigEntry, len(unprefixedTopicNames))
+	missingUnprefixedTopics := make([]string, 0, len(unprefixedTopicNames))
+	for _, unprefixedTopic := range unprefixedTopicNames {
+		if entries, ok := lib.getKafkaTopicConfig(unprefixedTopic); ok {
+			unprefixedTopicConfigs[unprefixedTopic] = entries
+		} else {
+			missingUnprefixedTopics = append(missingUnprefixedTopics, unprefixedTopic)
+		}
 	}
-	unprefixedDescribed := make(map[string]kafka.DescribeConfigResponseResource, len(resp.Resources))
-	for _, resource := range resp.Resources {
-		unprefixedDescribed[lib.removePrefix(resource.ResourceName)] = resource
+	unprefixedDescribeErrs := make(map[string]error)
+	if len(missingUnprefixedTopics) > 0 {
+		resp, err := lib.describeTopicConfigs(ctx, missingUnprefixedTopics)
+		if err != nil {
+			return err
+		}
+		lib.setKafkaTopicConfig(resp.Resources)
+		for _, resource := range resp.Resources {
+			unprefixedTopic := lib.removePrefix(resource.ResourceName)
+			if resource.Error != nil {
+				unprefixedDescribeErrs[unprefixedTopic] = resource.Error
+				continue
+			}
+			unprefixedTopicConfigs[unprefixedTopic] = resource.ConfigEntries
+		}
+	}
+	getUnprefixedTopicEntries := func(unprefixedTopic string) ([]kafka.DescribeConfigResponseConfigEntry, error) {
+		if entries, ok := unprefixedTopicConfigs[unprefixedTopic]; ok {
+			return entries, nil
+		}
+		if err, ok := unprefixedDescribeErrs[unprefixedTopic]; ok {
+			return nil, errors.Wrapf(err, "could not describe topic %s", unprefixedTopic)
+		}
+		return nil, errors.Errorf("not found topic %s", unprefixedTopic)
 	}
 	checkIntervalMs, err := lib.retentionCheckIntervalMs(ctx)
 	if err != nil {
@@ -113,59 +143,52 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 	}
 
 	trimErrs := make([]error, 0)
-	for topic, deadLetters := range exactlyOnceUnprefixedTopics {
-		original, ok := unprefixedDescribed[topic]
-		if !ok {
-			trimErrs = append(trimErrs, errors.Errorf("could not describe topic %s", topic))
-			continue
-		}
-		if original.Error != nil {
-			trimErrs = append(trimErrs, errors.Wrapf(original.Error, "could not describe topic %s", topic))
+	for unprefixedTopic, unprefixedDeadLetters := range exactlyOnceUnprefixedTopics {
+		originalEntries, err := getUnprefixedTopicEntries(unprefixedTopic)
+		if err != nil {
+			trimErrs = append(trimErrs, err)
 			continue
 		}
 
 		isLogAppendTime := false
-		for _, e := range original.ConfigEntries {
+		for _, e := range originalEntries {
 			if e.ConfigName == "message.timestamp.type" && e.ConfigValue == "LogAppendTime" {
 				isLogAppendTime = true
-				continue // skip if it's CreateTime
+				continue // skip if it's LogAppendTime
 			}
 		}
 		if !isLogAppendTime {
-			continue // skip if not found the timestamp type
+			// skip if CreateTime or Not found the timestamp type
+			// cannot safe trim when topic time is set by input.
+			continue
 		}
 
-		originalKeepMs, err := topicRetentionAndSegmentMs(original.ConfigEntries)
+		originalKeepMs, err := topicRetentionAndSegmentMs(originalEntries)
 		if err != nil {
-			trimErrs = append(trimErrs, errors.Wrapf(err, "could not trim topic %s", topic))
+			trimErrs = append(trimErrs, errors.Wrapf(err, "could not trim topic %s", unprefixedTopic))
 			continue
 		}
 		if originalKeepMs < 0 {
-			lib.logf(ctx, "[events] skip trim of topic %s, retention.ms or segment.ms is unlimited", topic)
+			lib.logf(ctx, "[events] skip trim of topic %s, retention.ms or segment.ms is unlimited", unprefixedTopic)
 			continue
 		}
 		var longestDeadLetterMs int64
 		skip := false
-		for _, deadLetter := range deadLetters {
-			resource, ok := unprefixedDescribed[deadLetter]
-			if !ok {
-				trimErrs = append(trimErrs, errors.Errorf("could not describe dead letter topic %s", deadLetter))
-				skip = true
-				break
-			}
-			if resource.Error != nil {
-				trimErrs = append(trimErrs, errors.Wrapf(resource.Error, "could not describe dead letter topic %s", deadLetter))
-				skip = true
-				break
-			}
-			deadLetterKeepMs, err := topicRetentionAndSegmentMs(resource.ConfigEntries)
+		for _, unprefixedDeadLetter := range unprefixedDeadLetters {
+			deadLetterEntries, err := getUnprefixedTopicEntries(unprefixedDeadLetter)
 			if err != nil {
-				trimErrs = append(trimErrs, errors.Wrapf(err, "could not trim topic %s", topic))
+				trimErrs = append(trimErrs, err)
+				skip = true
+				break
+			}
+			deadLetterKeepMs, err := topicRetentionAndSegmentMs(deadLetterEntries)
+			if err != nil {
+				trimErrs = append(trimErrs, errors.Wrapf(err, "could not trim topic %s", unprefixedTopic))
 				skip = true
 				break
 			}
 			if deadLetterKeepMs < 0 {
-				lib.logf(ctx, "[events] skip trim of topic %s, dead letter topic %s retention.ms or segment.ms is unlimited", topic, deadLetter)
+				lib.logf(ctx, "[events] skip trim of topic %s, dead letter topic %s retention.ms or segment.ms is unlimited", unprefixedTopic, unprefixedDeadLetter)
 				skip = true
 				break
 			}
@@ -178,22 +201,22 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 		}
 
 		if originalKeepMs > math.MaxInt64-longestDeadLetterMs-checkIntervalMs {
-			lib.logf(ctx, "[events] skip trim of topic %s, retention overflows", topic)
+			lib.logf(ctx, "[events] skip trim of topic %s, retention overflows", unprefixedTopic)
 			continue
 		}
 		keepMs := originalKeepMs + longestDeadLetterMs + checkIntervalMs
 		if keepMs > int64((math.MaxInt64-margin)/time.Millisecond) {
-			lib.logf(ctx, "[events] skip trim of topic %s, retention plus margin overflows", topic)
+			lib.logf(ctx, "[events] skip trim of topic %s, retention plus margin overflows", unprefixedTopic)
 			continue
 		}
 		keep := time.Duration(keepMs)*time.Millisecond + margin
 		trimOlderThan := time.Now().Add(-keep)
-		deleted, err := lib.db.TrimEventsProcessed(ctx, topic, trimOlderThan, batchSize, batchInterval)
+		deleted, err := lib.db.TrimEventsProcessed(ctx, unprefixedTopic, trimOlderThan, batchSize, batchInterval)
 		if err != nil {
 			trimErrs = append(trimErrs, err)
 			continue
 		}
-		lib.logf(ctx, "[events] trimmed %d exactly-once records for topic %q older than %s", deleted, topic, keep)
+		lib.logf(ctx, "[events] trimmed %d exactly-once records for topic %q older than %s", deleted, unprefixedTopic, keep)
 	}
 	return errors.Join(trimErrs...)
 }

@@ -119,8 +119,9 @@ type LibraryNoDB struct {
 	broadcast                 *group
 	startTime                 time.Time
 	ready                     atomic.Int32
-	topicConfig               map[string]kafka.TopicConfig  // un-prefixed
-	topicsWork                pwork.Work[string, topicsWhy] // un-prefixed in APIs
+	topicConfig               map[string]kafka.TopicConfig                         // un-prefixed, set with SetTopicConfig
+	kafkaTopicConfig          map[string][]kafka.DescribeConfigResponseConfigEntry // un-prefixed, last configs Kafka reported
+	topicsWork                pwork.Work[string, topicsWhy]                        // un-prefixed in APIs
 	topicListingStarted       sync.Once
 	topicsHaveBeenListed      chan struct{}
 	topicsListingErr          error // only valid after topicsHaveBeenListed is closed
@@ -158,11 +159,11 @@ type LibraryNoDB struct {
 	// "ready" is isNotConfigured or isConfigured:
 	// - writing to most of the fields of Library (calls to Configure)
 	// - reading/writing "readers" (calls to Consume*)
-	// - reading/writing topicConfig (can happen at any time)
+	// - reading/writing topicConfig and kafkaTopicConfig (can happen at any time)
 	// - writing "ready"
 	//
 	// "ready" is isRunning:
-	// - reading/writing topicConfig (can happen at any time)
+	// - reading/writing topicConfig and kafkaTopicConfig (can happen at any time)
 	//
 	// lock is not needed when "ready" is isRunning:
 	// - reading most fields of Library
@@ -259,6 +260,7 @@ func New[ID eventmodels.AbstractID[ID], TX eventmodels.AbstractTX, DB eventmodel
 				maxIdle: broadcastReaderIdleTimeout,
 			},
 			topicConfig:              make(map[string]kafka.TopicConfig),
+			kafkaTopicConfig:         make(map[string][]kafka.DescribeConfigResponseConfigEntry),
 			clientID:                 uuid.New().String(),
 			broadcastHeartbeat:       baseBroadcastHeartbeat,
 			heartbeatRandomness:      broadcastHeartbeatRandom,
