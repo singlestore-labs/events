@@ -7,7 +7,7 @@ func IsNil[T any](val T) bool {
 	kind := v.Kind()
 
 	// Check if the type is one that can be nil
-	if kind == reflect.Ptr || kind == reflect.Interface || kind == reflect.Slice ||
+	if kind == reflect.Pointer || kind == reflect.Interface || kind == reflect.Slice ||
 		kind == reflect.Map || kind == reflect.Chan || kind == reflect.Func {
 		return v.IsNil()
 	}
