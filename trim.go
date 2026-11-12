@@ -44,7 +44,7 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 		return errors.Errorf("trim batch size %d must be positive", batchSize)
 	}
 	if batchInterval < 0 {
-		return errors.Errorf("trim batch interval %s must not be negative", batchInterval)
+		return errors.Errorf("between batch pause %s must not be negative", batchInterval)
 	}
 	if !lib.HasDB() {
 		return errors.Errorf("event library trim requires a database")

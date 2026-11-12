@@ -159,15 +159,17 @@ type LibraryNoDB struct {
 	// "ready" is isNotConfigured or isConfigured:
 	// - writing to most of the fields of Library (calls to Configure)
 	// - reading/writing "readers" (calls to Consume*)
-	// - reading/writing topicConfig and kafkaTopicConfig (can happen at any time)
 	// - writing "ready"
 	//
 	// "ready" is isRunning:
-	// - reading/writing topicConfig and kafkaTopicConfig (can happen at any time)
+	// - (no additional fields)
 	//
 	// lock is not needed when "ready" is isRunning:
 	// - reading most fields of Library
 	// - reading "readers" (used while consuming)
+	//
+	// any time (regardless of "ready"):
+	// - reading/writing topicConfig and kafkaTopicConfig
 	lock sync.Mutex // taken when adjusting consumers
 
 	broadcastConsumerGroupName gwrap.AtomicValue[consumerGroupName]
@@ -616,8 +618,8 @@ func WithRetrying(retry bool) HandlerOpt {
 	}
 }
 
-// WithBaseTopic is applied automatically when processing dead letter topics
-func WithBaseTopic(topic string) HandlerOpt {
+// withBaseTopic is applied automatically when processing dead letter topics
+func withBaseTopic(topic string) HandlerOpt {
 	return func(r *registeredHandler, _ *LibraryNoDB) {
 		r.baseTopic = topic
 	}

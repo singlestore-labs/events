@@ -148,7 +148,7 @@ func (c Connection[TX, DB]) TrimEventsProcessed(ctx context.Context, topic strin
 		return 0, errors.Errorf("trim batch size %d must be positive", batchSize)
 	}
 	if betweenBatchPause < 0 {
-		return 0, errors.Errorf("trim batch interval %s must not be negative", betweenBatchPause)
+		return 0, errors.Errorf("between batch pause %s must not be negative", betweenBatchPause)
 	}
 	// processedAt is written by NOW() in the cluster's time zone.
 	trimOlderThan = trimOlderThan.Add(-trimOffset)

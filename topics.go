@@ -255,6 +255,9 @@ func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context, unprefixed
 	if len(incRequestResources) == 0 {
 		return describeErr
 	}
+	// Kafka's configs for these topics may have changed, even if the request failed.
+	// They are described again when next needed.
+	lib.deleteKafkaTopicConfig(incRequestResources)
 
 	client, err := lib.getController(ctx)
 	if err != nil {
@@ -263,9 +266,6 @@ func (lib *LibraryNoDB) syncTopicConfigFromKafka(ctx context.Context, unprefixed
 	updateResp, err := client.IncrementalAlterConfigs(ctx, &kafka.IncrementalAlterConfigsRequest{
 		Resources: incRequestResources,
 	})
-	// Kafka's configs for these topics may have changed, even if the request failed.
-	// They are described again when next needed.
-	lib.deleteKafkaTopicConfig(incRequestResources)
 	if err != nil {
 		return errors.Join(describeErr, errors.Wrapf(err, "failed to update topics config"))
 	}
@@ -300,6 +300,8 @@ func (lib *LibraryNoDB) generateKafkaUpdateRequests(resp *kafka.DescribeConfigsR
 
 		wantConfig, _ := lib.getTopicConfig(lib.removePrefix(kTopicConfig.ResourceName))
 		var incConfigs []kafka.IncrementalAlterConfigsRequestConfig
+		// Only configs we want are set. Configs that Kafka has but we don't
+		// set are intentionally left alone; we never delete extra configs.
 		for _, want := range wantConfig.ConfigEntries {
 			if have, ok := kafkaValues[want.ConfigName]; ok && have == want.ConfigValue {
 				continue

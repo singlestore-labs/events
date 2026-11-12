@@ -10,7 +10,7 @@ import (
 // Sleep waits for duration or for context cancel, whichever comes first
 func Sleep(ctx context.Context, duration time.Duration) error {
 	if duration < 0 {
-		return errors.Errorf("trim batch interval %s must not be negative", duration)
+		return errors.Errorf("between batch pause %s must not be negative", duration)
 	}
 	if duration == 0 {
 		return nil

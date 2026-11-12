@@ -84,7 +84,7 @@ func (lib *Library[ID, TX, DB]) startDeadLetterConsumers(startupCtx context.Cont
 				}
 				dlGroup.topics[dlTopic] = dlTopicHandler
 			}
-			deadLetterOpts := []HandlerOpt{WithRetrying(true), IsDeadLetterHandler(true), WithQueueDepthLimit(maximumDeadLetterOutstanding), WithBaseTopic(handler.baseTopic)}
+			deadLetterOpts := []HandlerOpt{WithRetrying(true), IsDeadLetterHandler(true), WithQueueDepthLimit(maximumDeadLetterOutstanding), withBaseTopic(handler.baseTopic)}
 			if handler.exactlyOnce {
 				deadLetterOpts = append(deadLetterOpts, withExactlyOnce())
 			}
