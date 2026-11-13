@@ -60,6 +60,7 @@ func (lib *LibraryNoDB) SetTopicConfig(topicConfig kafka.TopicConfig) {
 	if topicConfig.Topic == "" {
 		panic(errors.Alertf("attempt to register event library topic configuration with an empty topic name"))
 	}
+	topicConfig.ConfigEntries = slices.Clone(topicConfig.ConfigEntries)
 	lib.topicConfig[topicConfig.Topic] = topicConfig
 }
 
@@ -67,6 +68,7 @@ func (lib *LibraryNoDB) getTopicConfig(unprefixedTopic string) (kafka.TopicConfi
 	lib.lock.Lock()
 	defer lib.lock.Unlock()
 	c, ok := lib.topicConfig[unprefixedTopic]
+	c.ConfigEntries = slices.Clone(c.ConfigEntries)
 	return c, ok
 }
 
@@ -101,9 +103,10 @@ func (lib *LibraryNoDB) getKafkaTopicConfig(unprefixedTopic string) ([]kafka.Des
 	return c, ok
 }
 
-// UpdateTopicConfigs updates every topic registered in topicConfig.
+// UpdateTopicConfigs updates every topic registered in topicConfig while service is running.
 // If a topic doesn't already exist, it will be created.
 // Configs that were not set with SetTopicConfig are left as they are in Kafka.
+// NOTE: Do not use it as start up set up, use SetTopicConfig().
 func (lib *LibraryNoDB) UpdateTopicConfigs(ctx context.Context) (err error) {
 	topics := func() []string {
 		lib.lock.Lock()
@@ -179,7 +182,6 @@ func (lib *LibraryNoDB) setupDeadLetterTopicConfigHelper(topic, deadLetterTopic 
 	if _, ok := lib.getTopicConfig(deadLetterTopic); !ok {
 		if config, ok := lib.getTopicConfig(topic); ok {
 			config.Topic = deadLetterTopic
-			config.ConfigEntries = slices.Clone(config.ConfigEntries)
 			lib.SetTopicConfig(config)
 		}
 	}
