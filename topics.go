@@ -179,12 +179,18 @@ func (lib *LibraryNoDB) getOrDefaultConfig(unprefixedTopic string) kafka.TopicCo
 }
 
 func (lib *LibraryNoDB) setupDeadLetterTopicConfigHelper(topic, deadLetterTopic string) {
-	if _, ok := lib.getTopicConfig(deadLetterTopic); !ok {
-		if config, ok := lib.getTopicConfig(topic); ok {
-			config.Topic = deadLetterTopic
-			lib.SetTopicConfig(config)
-		}
+	lib.lock.Lock()
+	defer lib.lock.Unlock()
+	if _, ok := lib.topicConfig[deadLetterTopic]; ok {
+		return
 	}
+	config, ok := lib.topicConfig[topic]
+	if !ok {
+		return
+	}
+	config.Topic = deadLetterTopic
+	config.ConfigEntries = slices.Clone(config.ConfigEntries)
+	lib.topicConfig[deadLetterTopic] = config
 }
 
 // createTopics creates each topic in unprefixedTopics. Topics must be unique.

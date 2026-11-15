@@ -116,18 +116,38 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 	}
 	unprefixedDescribeErrs := make(map[string]error)
 	if len(missingUnprefixedTopics) > 0 {
-		resp, err := lib.describeTopicConfigs(ctx, missingUnprefixedTopics)
+		var resp *kafka.DescribeConfigsResponse
+		// pull config to local cache
+		err := func() error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case lib.syncConfigProcess <- struct{}{}:
+			}
+
+			defer func() {
+				<-lib.syncConfigProcess
+			}()
+			resp, err := lib.describeTopicConfigs(ctx, missingUnprefixedTopics)
+			if err != nil {
+				return err
+			}
+			lib.setKafkaTopicConfig(resp.Resources)
+			return nil
+		}()
 		if err != nil {
 			return err
 		}
-		lib.setKafkaTopicConfig(resp.Resources)
-		for _, resource := range resp.Resources {
-			unprefixedTopic := lib.removePrefix(resource.ResourceName)
-			if resource.Error != nil {
-				unprefixedDescribeErrs[unprefixedTopic] = resource.Error
-				continue
+
+		if resp != nil {
+			for _, resource := range resp.Resources {
+				unprefixedTopic := lib.removePrefix(resource.ResourceName)
+				if resource.Error != nil {
+					unprefixedDescribeErrs[unprefixedTopic] = resource.Error
+					continue
+				}
+				unprefixedTopicConfigs[unprefixedTopic] = resource.ConfigEntries
 			}
-			unprefixedTopicConfigs[unprefixedTopic] = resource.ConfigEntries
 		}
 	}
 	getUnprefixedTopicEntries := func(unprefixedTopic string) ([]kafka.DescribeConfigResponseConfigEntry, error) {
