@@ -118,7 +118,7 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 	if len(missingUnprefixedTopics) > 0 {
 		var resp *kafka.DescribeConfigsResponse
 		// pull config to local cache
-		err := func() error {
+		err := func() (err error) {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -128,7 +128,7 @@ func (lib *Library[ID, TX, DB]) TrimExactlyOnceDeliveryRecords(ctx context.Conte
 			defer func() {
 				<-lib.syncConfigProcess
 			}()
-			resp, err := lib.describeTopicConfigs(ctx, missingUnprefixedTopics)
+			resp, err = lib.describeTopicConfigs(ctx, missingUnprefixedTopics)
 			if err != nil {
 				return err
 			}
