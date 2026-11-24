@@ -59,6 +59,10 @@ type Producer[ID AbstractID[ID], TX AbstractTX] interface {
 	IsConfigured() bool
 	ValidateTopics(context.Context, []string) error
 	TracerProvider(context.Context) Tracer
+	// CatchUpProduceRunning reports whether a background catch-up producer has
+	// been started. Database layers use it to keep the post-commit send away
+	// from rows the catch-up producer is allowed to claim.
+	CatchUpProduceRunning() bool
 }
 
 // TracerConfig is how tracing becomes richer. All fields are optional. Additional fields may be
