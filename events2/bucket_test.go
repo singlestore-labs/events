@@ -16,9 +16,10 @@ func TestSetCatchUpBuckets(t *testing.T) {
 	assert.Equal(t, defaultCatchUpBuckets, conn.catchUpBucketCount())
 
 	conn.SetCatchUpBuckets(1)
-	count, stride := catchUpPlanFor(conn)
+	count, stride, offset := catchUpPlanFor(conn)
 	assert.Equal(t, 1, count)
 	assert.Equal(t, 1, stride)
+	assert.Equal(t, 0, offset)
 
 	conn.SetCatchUpBuckets(8)
 	assert.Equal(t, 8, conn.catchUpBucketCount())
@@ -82,33 +83,57 @@ func TestCatchUpStrideVisitsEveryBucket(t *testing.T) {
 			if count > 1 && count%stride == 0 {
 				t.Fatalf("count %d stride %d divides the count", count, stride)
 			}
-			seen := make(map[int]struct{}, count)
-			for step := 0; step < count; step++ {
-				seen[bucketForStep(step, stride, count)] = struct{}{}
+			offsets := []int{0}
+			if count > 1 {
+				offsets = []int{0, 1, count / 2, count - 1}
 			}
-			assert.Len(t, seen, count, "count %d stride %d trial %d", count, stride, trial)
+			for _, offset := range offsets {
+				seen := make(map[int]struct{}, count)
+				for step := 0; step < count; step++ {
+					seen[bucketForStep(step, stride, offset, count)] = struct{}{}
+				}
+				assert.Len(t, seen, count, "count %d stride %d offset %d trial %d", count, stride, offset, trial)
+				start := 0
+				if count > 1 {
+					start = offset % count
+				}
+				assert.Equal(t, start, bucketForStep(0, stride, offset, count), "count %d stride %d offset %d", count, stride, offset)
+			}
 		}
 	}
 }
 
 func TestCatchUpStrideStaysPutUntilTheCountChanges(t *testing.T) {
 	cache := &catchUpStrideCache{}
-	first := cache.strideFor(8)
-	assert.Equal(t, first, cache.strideFor(8))
+	first, firstOffset := cache.strideFor(8)
+	again, againOffset := cache.strideFor(8)
+	assert.Equal(t, first, again)
+	assert.Equal(t, firstOffset, againOffset)
+	assert.GreaterOrEqual(t, firstOffset, 0)
+	assert.Less(t, firstOffset, 8)
 	assert.NotZero(t, 8%first)
 
 	seen := map[int]struct{}{}
 	for step := 0; step < 8; step++ {
-		seen[bucketForStep(step, first, 8)] = struct{}{}
+		seen[bucketForStep(step, first, firstOffset, 8)] = struct{}{}
 	}
 	assert.Len(t, seen, 8)
+	assert.Equal(t, firstOffset, bucketForStep(0, first, firstOffset, 8))
 
-	other := cache.strideFor(9)
-	assert.Equal(t, other, cache.strideFor(9))
+	other, otherOffset := cache.strideFor(9)
+	againOther, againOtherOffset := cache.strideFor(9)
+	assert.Equal(t, other, againOther)
+	assert.Equal(t, otherOffset, againOtherOffset)
+	assert.GreaterOrEqual(t, otherOffset, 0)
+	assert.Less(t, otherOffset, 9)
 	assert.NotZero(t, 9%other)
 
-	restored := cache.strideFor(8)
-	assert.Equal(t, restored, cache.strideFor(8))
+	restored, restoredOffset := cache.strideFor(8)
+	againRestored, againRestoredOffset := cache.strideFor(8)
+	assert.Equal(t, restored, againRestored)
+	assert.Equal(t, restoredOffset, againRestoredOffset)
+	assert.GreaterOrEqual(t, restoredOffset, 0)
+	assert.Less(t, restoredOffset, 8)
 	assert.NotZero(t, 8%restored)
 }
 

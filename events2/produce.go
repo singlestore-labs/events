@@ -53,26 +53,29 @@ type Connection[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]] struct {
 	catchUpStride  *catchUpStrideCache
 }
 
-// catchUpStrideCache keeps one prime stride per bucket count. A pod walks
-// buckets in the same order until the count changes, so pods with different
-// strides cross instead of marching together.
+// catchUpStrideCache keeps one prime stride and one start offset per bucket
+// count. A pod walks buckets in the same order until the count changes.
+// Pods with different offsets and strides cross instead of all locking
+// bucket 0 on step 0.
 type catchUpStrideCache struct {
 	mu     sync.Mutex
 	count  int
 	stride int
+	offset int
 }
 
-func (c *catchUpStrideCache) strideFor(count int) int {
+func (c *catchUpStrideCache) strideFor(count int) (stride, offset int) {
 	if count <= 1 {
-		return 1
+		return 1, 0
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.count != count || c.stride == 0 {
 		c.count = count
 		c.stride = catchUpStride(count)
+		c.offset = catchUpOffset(count)
 	}
-	return c.stride
+	return c.stride, c.offset
 }
 
 func New[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]](db DB, lockPrefix string) *Connection[TX, DB] {
@@ -111,12 +114,12 @@ func (c Connection[TX, DB]) catchUpBucketCount() int {
 	return n
 }
 
-func (c Connection[TX, DB]) catchUpStrideFor(count int) int {
+func (c Connection[TX, DB]) catchUpStrideFor(count int) (int, int) {
 	if count <= 1 {
-		return 1
+		return 1, 0
 	}
 	if c.catchUpStride == nil {
-		return catchUpStride(count)
+		return catchUpStride(count), catchUpOffset(count)
 	}
 	return c.catchUpStride.strideFor(count)
 }
@@ -312,13 +315,13 @@ func ProduceDroppedTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransac
 	if batchSize < 1 {
 		return 0, errors.Errorf("catch-up batch size must be at least 1")
 	}
-	bucketCount, stride := catchUpPlanFor(db)
+	bucketCount, stride, offset := catchUpPlanFor(db)
 	var totalCount int
 	for step := 0; step < bucketCount; step++ {
 		if ctx.Err() != nil {
 			return totalCount, nil
 		}
-		bucket := bucketForStep(step, stride, bucketCount)
+		bucket := bucketForStep(step, stride, offset, bucketCount)
 		for {
 			ids, err := selectCatchUpIDs(ctx, db, batchSize, bucket, bucketCount)
 			if err != nil {
@@ -554,32 +557,44 @@ func idBound(i *big.Int) []byte {
 	return out
 }
 
-func bucketForStep(step, stride, count int) int {
+// bucketForStep walks one catch-up pass. offset is a per-pod start, so step 0
+// is not bucket 0 on every pod. stride then visits each bucket once.
+func bucketForStep(step, stride, offset, count int) int {
 	if count <= 1 {
 		return 0
 	}
-	return int((int64(step) * int64(stride)) % int64(count))
+	return int((int64(offset) + int64(step)*int64(stride)) % int64(count))
 }
 
 type catchUpPlanner interface {
 	catchUpBucketCount() int
-	catchUpStrideFor(int) int
+	catchUpStrideFor(int) (stride, offset int)
 }
 
-func catchUpPlanFor(db any) (count, stride int) {
+func catchUpPlanFor(db any) (count, stride, offset int) {
 	if plan, ok := db.(catchUpPlanner); ok {
 		count = plan.catchUpBucketCount()
 		if count < 1 {
 			count = 1
 		}
-		return count, plan.catchUpStrideFor(count)
+		stride, offset = plan.catchUpStrideFor(count)
+		return count, stride, offset
 	}
-	return defaultCatchUpBuckets, catchUpStride(defaultCatchUpBuckets)
+	return defaultCatchUpBuckets, catchUpStride(defaultCatchUpBuckets), catchUpOffset(defaultCatchUpBuckets)
+}
+
+// catchUpOffset is the bucket a pod locks first. It stays in [0, count).
+// Without it, (step * stride) % count is 0 for every stride when step is 0.
+func catchUpOffset(count int) int {
+	if count <= 1 {
+		return 0
+	}
+	return rand.Intn(count)
 }
 
 // catchUpStride picks a prime below 1000 that does not divide count. Stepping
-// by that prime visits every bucket once per pass, in an order that differs
-// per pod.
+// by that prime visits every bucket once per pass. The start bucket is
+// catchUpOffset; this prime only changes the order after that.
 func catchUpStride(count int) int {
 	if count <= 1 {
 		return 1
