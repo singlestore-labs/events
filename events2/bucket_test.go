@@ -13,14 +13,14 @@ import (
 
 func TestSetCatchUpBuckets(t *testing.T) {
 	conn := New[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB](eventdb.ExampleBasicDB{}, "prefix")
-	count, stride, offset := catchUpPlanFor(conn)
+	count, stride, offset := conn.catchUpPlan()
 	assert.Equal(t, defaultCatchUpBuckets, count)
 	assert.NotZero(t, count%stride)
 	assert.GreaterOrEqual(t, offset, 0)
 	assert.Less(t, offset, count)
 
 	conn.SetCatchUpBuckets(0)
-	count, stride, offset = catchUpPlanFor(conn)
+	count, stride, offset = conn.catchUpPlan()
 	assert.Equal(t, 1, count)
 	assert.Equal(t, 1, stride)
 	assert.Equal(t, 0, offset)

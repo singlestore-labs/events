@@ -7,12 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/big"
-	"math/rand"
 	"os"
 	"sort"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
@@ -32,7 +28,6 @@ const (
 	minimumLockAttemptTime = 100 * time.Millisecond // DB BEGIN + SELECT FOR UPDATE
 	foreverLockAttemptTime = time.Minute * 2
 
-	defaultCatchUpBuckets = 8
 	// sendAfterGrace is how long the post-commit send owns a row. Catch-up
 	// selects a row only after this has passed.
 	//
@@ -47,47 +42,23 @@ var debugging = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
 
 type Connection[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]] struct {
 	eventdb.BasicDB[TX]
-	lockPrefix     string
-	producer       eventmodels.Producer[eventmodels.BinaryEventID, TX]
-	catchUpBuckets *atomic.Int32
-	catchUpStride  *atomic.Int32
-	catchUpOffset  *atomic.Int32
+	lockPrefix string
+	producer   eventmodels.Producer[eventmodels.BinaryEventID, TX]
+	// catchUpBuckets, catchUpStride, and catchUpOffset are the catch-up walk.
+	// One catch-up loop runs at a time and these are not written during that
+	// loop, so they are not guarded. SetCatchUpBuckets is not goroutine-safe.
+	catchUpBuckets int
+	catchUpStride  int
+	catchUpOffset  int
 }
 
 func New[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]](db DB, lockPrefix string) *Connection[TX, DB] {
 	conn := &Connection[TX, DB]{
-		BasicDB:        db,
-		lockPrefix:     lockPrefix,
-		catchUpBuckets: &atomic.Int32{},
-		catchUpStride:  &atomic.Int32{},
-		catchUpOffset:  &atomic.Int32{},
+		BasicDB:    db,
+		lockPrefix: lockPrefix,
 	}
 	conn.SetCatchUpBuckets(defaultCatchUpBuckets)
 	return conn
-}
-
-// SetCatchUpBuckets sets how many id ranges the background catch-up splits
-// eventsOutgoing into. Values below 1 are stored as 1, which turns bucketing
-// off and scans the whole id space in one pass. The default is 8. The stride
-// and starting bucket are chosen here and kept until the next call, so a pod
-// walks the same order on each pass. A change takes effect on the next pass.
-func (c *Connection[TX, DB]) SetCatchUpBuckets(n int) {
-	if n < 1 {
-		n = 1
-	}
-	stride := 1
-	offset := 0
-	if n > 1 {
-		stride = catchUpStride(n)
-		offset = rand.Intn(n)
-	}
-	c.catchUpStride.Store(int32(stride))
-	c.catchUpOffset.Store(int32(offset))
-	c.catchUpBuckets.Store(int32(n))
-}
-
-func (c Connection[TX, DB]) catchUpPlan() (count, stride, offset int) {
-	return int(c.catchUpBuckets.Load()), int(c.catchUpStride.Load()), int(c.catchUpOffset.Load())
 }
 
 func Migrations(database *libschema.Database, singlestore *lssinglestore.SingleStore) {
@@ -181,7 +152,7 @@ func (c *Connection[TX, DB]) ProduceSpecificTxEvents(ctx context.Context, ids []
 }
 
 func (c *Connection[TX, DB]) ProduceDroppedTxEvents(ctx context.Context, batchSize int) (int, error) {
-	return ProduceDroppedTxEvents[TX, *Connection[TX, DB]](ctx, c, batchSize, c.producer)
+	return ProduceDroppedTxEvents[TX, *Connection[TX, DB]](ctx, c, batchSize, c.producer, c.catchUpBuckets, c.catchUpStride, c.catchUpOffset)
 }
 
 func (c Connection[TX, DB]) MarkEventProcessed(ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
@@ -274,11 +245,10 @@ func ProduceSpecificTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransa
 	return count, err
 }
 
-func ProduceDroppedTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ctx context.Context, db DB, batchSize int, producer eventmodels.Producer[eventmodels.BinaryEventID, TX]) (int, error) {
+func ProduceDroppedTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ctx context.Context, db DB, batchSize int, producer eventmodels.Producer[eventmodels.BinaryEventID, TX], bucketCount, stride, offset int) (int, error) {
 	if producer == nil {
 		return 0, errors.Errorf("attempt to produce dropped events with a connection not augmented with a producer")
 	}
-	bucketCount, stride, offset := catchUpPlanFor(db)
 	var totalCount int
 	for step := 0; step < bucketCount; step++ {
 		if ctx.Err() != nil {
@@ -431,8 +401,8 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 	return count, err
 }
 
-func sendAfterExpr(producerIsSet bool) sq.Sqlizer {
-	if !producerIsSet {
+func sendAfterExpr(catchUpRunning bool) sq.Sqlizer {
+	if !catchUpRunning {
 		return sq.Expr("NOW(6)")
 	}
 	return sq.Expr(fmt.Sprintf("NOW(6) + INTERVAL %d MICROSECOND", sendAfterGrace.Microseconds()))
@@ -484,97 +454,6 @@ func selectCatchUpIDs[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]]
 	return ids, nil
 }
 
-func applyBucketBounds(sb sq.SelectBuilder, bucket, count int) sq.SelectBuilder {
-	if count <= 1 {
-		return sb
-	}
-	low, high, hasHigh := bucketBounds(bucket, count)
-	sb = sb.Where(sq.GtOrEq{"id": low})
-	if hasHigh {
-		sb = sb.Where(sq.Lt{"id": high})
-	}
-	return sb
-}
-
-// bucketBounds splits the 16-byte id space into count contiguous ranges.
-// Ranges tile every possible id, so shrinking the count leaves nothing behind.
-// The last bucket has no upper bound.
-func bucketBounds(bucket, count int) (low, high []byte, hasHigh bool) {
-	span := new(big.Int).Lsh(big.NewInt(1), 128)
-	n := big.NewInt(int64(count))
-	low = idBound(new(big.Int).Div(new(big.Int).Mul(big.NewInt(int64(bucket)), span), n))
-	if bucket >= count-1 {
-		return low, nil, false
-	}
-	high = idBound(new(big.Int).Div(new(big.Int).Mul(big.NewInt(int64(bucket+1)), span), n))
-	return low, high, true
-}
-
-func idBound(i *big.Int) []byte {
-	raw := i.Bytes()
-	if len(raw) > 16 {
-		raw = raw[len(raw)-16:]
-	}
-	out := make([]byte, 16)
-	copy(out[16-len(raw):], raw)
-	return out
-}
-
-func bucketForStep(step, stride, offset, count int) int {
-	if count <= 1 {
-		return 0
-	}
-	return int((int64(offset) + int64(step)*int64(stride)) % int64(count))
-}
-
-type catchUpPlanner interface {
-	catchUpPlan() (count, stride, offset int)
-}
-
-func catchUpPlanFor(db any) (count, stride, offset int) {
-	if plan, ok := db.(catchUpPlanner); ok {
-		return plan.catchUpPlan()
-	}
-	count = defaultCatchUpBuckets
-	return count, catchUpStride(count), rand.Intn(count)
-}
-
-// catchUpStride picks a prime below 1000 that does not divide count. Stepping
-// by that prime visits every bucket once per pass, in an order that differs
-// per pod.
-func catchUpStride(count int) int {
-	if count <= 1 {
-		return 1
-	}
-	candidates := primesBelow1000()
-	usable := make([]int, 0, len(candidates))
-	for _, prime := range candidates {
-		if count%prime != 0 {
-			usable = append(usable, prime)
-		}
-	}
-	if len(usable) == 0 {
-		return 1
-	}
-	return usable[rand.Intn(len(usable))]
-}
-
-var primesBelow1000 = sync.OnceValue(func() []int {
-	const max = 1000
-	composite := make([]bool, max)
-	primes := make([]int, 0, 168)
-	for i := 2; i < max; i++ {
-		if composite[i] {
-			continue
-		}
-		primes = append(primes, i)
-		for j := i * i; j < max; j += i {
-			composite[j] = true
-		}
-	}
-	return primes
-})
-
 func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
 	result, err := tx.ExecContext(ctx, `
 		INSERT IGNORE INTO eventsProcessed (topic, source, id, handlerName, processedAt)
@@ -608,9 +487,9 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, backupTr
 	ib := sq.Insert("eventsOutgoing").
 		Columns("id", "sequenceNumber", "topic", "ts", "`key`", "data", "headers", "sendAfter").
 		PlaceholderFormat(sq.Question)
-	// A producer will try to send the row itself, so catch-up waits out
-	// sendAfterGrace. With no producer, only catch-up can send it.
-	sendAfter := sendAfterExpr(optProducer != nil)
+	// While catch-up is running, the post-commit send owns the row for
+	// sendAfterGrace. Otherwise catch-up may take it immediately.
+	sendAfter := sendAfterExpr(optProducer != nil && optProducer.CatchUpProduceRunning())
 
 	for i, event := range events {
 		topic := event.GetTopic()
