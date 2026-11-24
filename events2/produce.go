@@ -7,7 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
+	"math/rand"
 	"os"
+	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
@@ -26,21 +31,94 @@ const (
 	produceFromTableBuffer = 512
 	minimumLockAttemptTime = 100 * time.Millisecond // DB BEGIN + SELECT FOR UPDATE
 	foreverLockAttemptTime = time.Minute * 2
+
+	defaultCatchUpBuckets = 8
+	// sendAfterGrace is how long the post-commit send owns a row. Catch-up
+	// selects a row only after this has passed.
+	//
+	// fastPathSendTimeout bounds one post-commit attempt. The library can hold
+	// one batch behind an in-flight send, so a row's locks last at most two
+	// attempts. Two attempts fit inside sendAfterGrace.
+	sendAfterGrace      = 2 * time.Minute
+	fastPathSendTimeout = 30 * time.Second
 )
 
 var debugging = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
 
 type Connection[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]] struct {
 	eventdb.BasicDB[TX]
-	lockPrefix string
-	producer   eventmodels.Producer[eventmodels.BinaryEventID, TX]
+	lockPrefix     string
+	producer       eventmodels.Producer[eventmodels.BinaryEventID, TX]
+	catchUpBuckets *atomic.Int32
+	catchUpStride  *catchUpStrideCache
+}
+
+// catchUpStrideCache keeps one prime stride per bucket count. A pod walks
+// buckets in the same order until the count changes, so pods with different
+// strides cross instead of marching together.
+type catchUpStrideCache struct {
+	mu     sync.Mutex
+	count  int
+	stride int
+}
+
+func (c *catchUpStrideCache) strideFor(count int) int {
+	if count <= 1 {
+		return 1
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.count != count || c.stride == 0 {
+		c.count = count
+		c.stride = catchUpStride(count)
+	}
+	return c.stride
 }
 
 func New[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]](db DB, lockPrefix string) *Connection[TX, DB] {
+	buckets := &atomic.Int32{}
+	buckets.Store(defaultCatchUpBuckets)
 	return &Connection[TX, DB]{
-		BasicDB:    db,
-		lockPrefix: lockPrefix,
+		BasicDB:        db,
+		lockPrefix:     lockPrefix,
+		catchUpBuckets: buckets,
+		catchUpStride:  &catchUpStrideCache{},
 	}
+}
+
+// SetCatchUpBuckets sets how many id ranges the background catch-up splits
+// eventsOutgoing into. The minimum is 1, which turns bucketing off and scans
+// the whole id space in one pass. The default is 8. A change takes effect on
+// the next catch-up pass.
+func (c *Connection[TX, DB]) SetCatchUpBuckets(n int) {
+	if c == nil || c.catchUpBuckets == nil {
+		panic("events2: SetCatchUpBuckets on uninitialized connection")
+	}
+	if n < 1 {
+		panic("events2: catch-up bucket count must be at least 1")
+	}
+	c.catchUpBuckets.Store(int32(n))
+}
+
+func (c Connection[TX, DB]) catchUpBucketCount() int {
+	if c.catchUpBuckets == nil {
+		return defaultCatchUpBuckets
+	}
+	n := int(c.catchUpBuckets.Load())
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+func (c Connection[TX, DB]) catchUpStrideFor(count int) int {
+	if count <= 1 {
+		return 1
+	}
+	if c.catchUpStride == nil {
+		return catchUpStride(count)
+	}
+	return c.catchUpStride.strideFor(count)
 }
 
 func Migrations(database *libschema.Database, singlestore *lssinglestore.SingleStore) {
@@ -63,11 +141,20 @@ func Migrations(database *libschema.Database, singlestore *lssinglestore.SingleS
 				`+"`key`"+`	text				NOT NULL,
 				headers		json				NOT NULL,
 				data		json				NOT NULL,
+				sendAfter	datetime(6)			NOT NULL DEFAULT NOW(6),
 				PRIMARY KEY (id),
 				SORT KEY (ts, sequenceNumber, id),
 				SHARD KEY (id)
 			)
 			COMMENT 'ephemeral data, only existing until events are sent to Kafka'`),
+
+		lssinglestore.Script("add-eventsOutgoing-sendAfter", `
+			ALTER TABLE eventsOutgoing
+			ADD COLUMN sendAfter DATETIME(6) NOT NULL DEFAULT NOW(6)`,
+			libschema.SkipIf(func() (bool, error) {
+				return singlestore.DoesColumnExist("eventsOutgoing", "sendAfter")
+			}),
+		),
 
 		lssinglestore.Script("create-eventsOutgoing-ts-index", `
 			CREATE INDEX eventsOutgoing_ts_idx ON eventsOutgoing (ts, sequenceNumber)`,
@@ -204,8 +291,13 @@ func LockOrError[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](
 }
 
 func ProduceSpecificTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ctx context.Context, db DB, ids []eventmodels.BinaryEventID, producer eventmodels.Producer[eventmodels.BinaryEventID, TX]) (int, error) {
+	// One attempt. A batch can wait behind one in-flight send before this starts,
+	// so a row is locked for at most two of these, which stays inside
+	// sendAfterGrace. A shorter caller deadline still wins.
+	ctx, cancel := context.WithTimeout(ctx, fastPathSendTimeout)
+	defer cancel()
 	startTime := time.Now()
-	count, err := produceEvents[TX, DB](ctx, db, eventmodels.ProduceInTransaction, 0, ids, producer)
+	count, err := produceEvents[TX, DB](ctx, db, eventmodels.ProduceInTransaction, ids, producer)
 	events.ObserveProduceLatency(err, startTime)
 	if errors.Is(err, sql.ErrNoRows) {
 		return count, nil
@@ -217,38 +309,61 @@ func ProduceDroppedTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransac
 	if producer == nil {
 		return 0, errors.Errorf("attempt to produce dropped events with a connection not augmented with a producer")
 	}
+	if batchSize < 1 {
+		return 0, errors.Errorf("catch-up batch size must be at least 1")
+	}
+	bucketCount, stride := catchUpPlanFor(db)
 	var totalCount int
-	for {
-		count, err := produceEvents(ctx, db, eventmodels.ProduceCatchUp, batchSize, nil, producer)
-		totalCount += count
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			if debugging {
-				producer.TracerProvider(ctx)("[events] Catch-up background producer found no pending events")
-			}
+	for step := 0; step < bucketCount; step++ {
+		if ctx.Err() != nil {
 			return totalCount, nil
-		case err != nil:
-			_ = producer.RecordError(ctx, "produceStoredEvents", err)
-			return totalCount, err
-		default:
-			producer.TracerProvider(ctx)("[events] Catch-up background producer sent %d events", count)
-			if count == 0 {
+		}
+		bucket := bucketForStep(step, stride, bucketCount)
+		for {
+			ids, err := selectCatchUpIDs(ctx, db, batchSize, bucket, bucketCount)
+			if err != nil {
+				if ctx.Err() != nil {
+					return totalCount, nil
+				}
+				_ = producer.RecordError(ctx, "produceStoredEvents", err)
+				return totalCount, err
+			}
+			if len(ids) == 0 {
+				break
+			}
+			count, err := produceEvents(ctx, db, eventmodels.ProduceCatchUp, ids, producer)
+			totalCount += count
+			if ctx.Err() != nil {
 				return totalCount, nil
 			}
-			// Go around again and look for more right away. We'll stop when we get zero records.
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				// The pre-selected rows were taken by another producer.
+			case err != nil:
+				_ = producer.RecordError(ctx, "produceStoredEvents", err)
+				return totalCount, err
+			default:
+				producer.TracerProvider(ctx)("[events] Catch-up background producer sent %d events", count)
+			}
+			if len(ids) < batchSize {
+				break
+			}
 		}
 	}
+	if totalCount == 0 && debugging {
+		producer.TracerProvider(ctx)("[events] Catch-up background producer found no pending events")
+	}
+	return totalCount, nil
 }
 
-// produceEvents looks for stored outgoing events (filtering with the provided
-// where clause) and sends them to the message queue. If there are no events that
-// match the where clause then sql.ErrNoRows will be returned. Events that are
-// sent are deleted.
+// produceEvents locks the given outgoing rows, deletes them, and sends them to
+// the message queue. Locks are taken by primary key. If none of the ids are
+// still pending, sql.ErrNoRows is returned.
 //
-// If ids are provided (optional) then only those ids will be considered an the limit
-// parameter is ignored. If no ids are provided, then limit must be greater than
-// zero and at most that limit events will be sent.
-func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ctx context.Context, db DB, method eventmodels.ProduceMethod, limit int, ids []eventmodels.BinaryEventID, producer eventmodels.Producer[eventmodels.BinaryEventID, TX]) (int, error) {
+// While catch-up is running, a post-commit send leaves rows whose sendAfter has
+// passed. Those belong to catch-up. With no catch-up running, every requested
+// id is sent so nothing is stranded.
+func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ctx context.Context, db DB, method eventmodels.ProduceMethod, ids []eventmodels.BinaryEventID, producer eventmodels.Producer[eventmodels.BinaryEventID, TX]) (int, error) {
 	if producer == nil {
 		return 0, errors.Errorf("attempt to produce events with a connection not augmented with a producer")
 	}
@@ -259,28 +374,26 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 		return 0, nil // on purpose
 	default:
 	}
+	if len(ids) == 0 {
+		return 0, sql.ErrNoRows
+	}
 
 	sb := sq.
 		Select("id", "topic", "ts", "sequenceNumber", "`key`", "data", "headers").
 		From("eventsOutgoing").
+		Where(sq.Eq{"id": ids}).
 		Suffix("FOR UPDATE").
 		PlaceholderFormat(sq.Question)
-
-	if len(ids) == 0 {
-		// It's possible that this may lock more rows than are returned. If
-		// that happens, the extra rows will be unlocked when the transaction
-		// completes and some other producer can send them. It's better to
-		// over-lock than to under-limit because filling the limit is a signal
-		// to the CatchUpProducer that ProduceEvents should be called again
-		// right away.
-		sb = sb.Limit(uint64(limit)).
-			OrderBy("ts ASC", "sequenceNumber ASC")
-	} else {
-		sb = sb.Where(sq.Eq{"id": ids})
+	if method == eventmodels.ProduceInTransaction && producer.CatchUpProduceRunning() {
+		sb = sb.Where("sendAfter > NOW(6)")
 	}
-	q, args, err := sb.PlaceholderFormat(sq.Question).ToSql()
+	q, args, err := sb.ToSql()
 	if err != nil {
 		return 0, errors.Errorf("[Events] cannot build query to produce events: %w", err)
+	}
+	order := make(map[string]int, len(ids))
+	for i, id := range ids {
+		order[id.String()] = i
 	}
 	var count int
 	err = db.Transact(ctx, func(tx TX) (finalErr error) {
@@ -310,25 +423,33 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 			}
 			toProduce = append(toProduce, &blob)
 		}
-
+		if err := rows.Err(); err != nil {
+			return errors.Errorf("cannot read list of events to produce: %w", err)
+		}
 		if len(toProduce) == 0 {
 			return sql.ErrNoRows
 		}
+		sort.SliceStable(toProduce, func(i, j int) bool {
+			return order[toProduce[i].ID.String()] < order[toProduce[j].ID.String()]
+		})
 
-		for _, event := range toProduce {
-			results, err := tx.ExecContext(ctx, `
-				DELETE FROM eventsOutgoing
-				WHERE	id = ?`, event.ID)
-			if err != nil {
-				return errors.WithStack(err)
-			}
-			rowCount, err := results.RowsAffected()
-			if err != nil {
-				return errors.WithStack(err)
-			}
-			if rowCount != 1 {
-				return errors.Errorf("attempt to delete event (%s) from outgoing table didn't work (%d)", event.ID, rowCount)
-			}
+		deleted, delArgs, err := sq.Delete("eventsOutgoing").
+			Where(sq.Eq{"id": eventIDs(toProduce)}).
+			PlaceholderFormat(sq.Question).
+			ToSql()
+		if err != nil {
+			return errors.Errorf("cannot build delete of produced events: %w", err)
+		}
+		results, err := tx.ExecContext(ctx, deleted, delArgs...)
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		rowCount, err := results.RowsAffected()
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		if rowCount != int64(len(toProduce)) {
+			return errors.Errorf("attempt to delete %d events from outgoing table deleted %d", len(toProduce), rowCount)
 		}
 
 		count += len(toProduce)
@@ -343,6 +464,154 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 	})
 	return count, err
 }
+
+func sendAfterExpr(producerIsSet bool) sq.Sqlizer {
+	if !producerIsSet {
+		return sq.Expr("NOW(6)")
+	}
+	return sq.Expr(fmt.Sprintf("NOW(6) + INTERVAL %d MICROSECOND", sendAfterGrace.Microseconds()))
+}
+
+func eventIDs(events []*eventdb.ProducingEventBlob[eventmodels.BinaryEventID]) []eventmodels.BinaryEventID {
+	ids := make([]eventmodels.BinaryEventID, len(events))
+	for i, event := range events {
+		ids[i] = event.ID
+	}
+	return ids
+}
+
+// selectCatchUpIDs reads ids of rows catch-up is allowed to send, without
+// locking them. The caller then locks those ids by primary key. A bucket count
+// of 1 covers the whole id space.
+func selectCatchUpIDs[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ctx context.Context, db DB, limit, bucket, bucketCount int) (ids []eventmodels.BinaryEventID, err error) {
+	sb := sq.Select("id").
+		From("eventsOutgoing").
+		Where("sendAfter <= NOW(6)").
+		OrderBy("ts ASC", "sequenceNumber ASC").
+		Limit(uint64(limit)).
+		PlaceholderFormat(sq.Question)
+	sb = applyBucketBounds(sb, bucket, bucketCount)
+	q, args, err := sb.ToSql()
+	if err != nil {
+		return nil, errors.Errorf("[Events] cannot build catch-up id query: %w", err)
+	}
+	rows, err := db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, errors.Errorf("cannot list events for catch-up: %w", err)
+	}
+	defer func() {
+		closeErr := rows.Close()
+		if err == nil && closeErr != nil {
+			err = errors.Errorf("cannot close catch-up id cursor: %w", closeErr)
+		}
+	}()
+	for rows.Next() {
+		var id eventmodels.BinaryEventID
+		if err = rows.Scan(&id); err != nil {
+			return nil, errors.Errorf("cannot scan catch-up event id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, errors.Errorf("cannot read catch-up event ids: %w", err)
+	}
+	return ids, nil
+}
+
+func applyBucketBounds(sb sq.SelectBuilder, bucket, count int) sq.SelectBuilder {
+	if count <= 1 {
+		return sb
+	}
+	low, high, hasHigh := bucketBounds(bucket, count)
+	sb = sb.Where(sq.GtOrEq{"id": low})
+	if hasHigh {
+		sb = sb.Where(sq.Lt{"id": high})
+	}
+	return sb
+}
+
+// bucketBounds splits the 16-byte id space into count contiguous ranges.
+// Ranges tile every possible id, so shrinking the count leaves nothing behind.
+// The last bucket has no upper bound.
+func bucketBounds(bucket, count int) (low, high []byte, hasHigh bool) {
+	span := new(big.Int).Lsh(big.NewInt(1), 128)
+	n := big.NewInt(int64(count))
+	low = idBound(new(big.Int).Div(new(big.Int).Mul(big.NewInt(int64(bucket)), span), n))
+	if bucket >= count-1 {
+		return low, nil, false
+	}
+	high = idBound(new(big.Int).Div(new(big.Int).Mul(big.NewInt(int64(bucket+1)), span), n))
+	return low, high, true
+}
+
+func idBound(i *big.Int) []byte {
+	raw := i.Bytes()
+	if len(raw) > 16 {
+		raw = raw[len(raw)-16:]
+	}
+	out := make([]byte, 16)
+	copy(out[16-len(raw):], raw)
+	return out
+}
+
+func bucketForStep(step, stride, count int) int {
+	if count <= 1 {
+		return 0
+	}
+	return int((int64(step) * int64(stride)) % int64(count))
+}
+
+type catchUpPlanner interface {
+	catchUpBucketCount() int
+	catchUpStrideFor(int) int
+}
+
+func catchUpPlanFor(db any) (count, stride int) {
+	if plan, ok := db.(catchUpPlanner); ok {
+		count = plan.catchUpBucketCount()
+		if count < 1 {
+			count = 1
+		}
+		return count, plan.catchUpStrideFor(count)
+	}
+	return defaultCatchUpBuckets, catchUpStride(defaultCatchUpBuckets)
+}
+
+// catchUpStride picks a prime below 1000 that does not divide count. Stepping
+// by that prime visits every bucket once per pass, in an order that differs
+// per pod.
+func catchUpStride(count int) int {
+	if count <= 1 {
+		return 1
+	}
+	candidates := primesBelow1000()
+	usable := make([]int, 0, len(candidates))
+	for _, prime := range candidates {
+		if count%prime != 0 {
+			usable = append(usable, prime)
+		}
+	}
+	if len(usable) == 0 {
+		return 1
+	}
+	return usable[rand.Intn(len(usable))]
+}
+
+var primesBelow1000 = sync.OnceValue(func() []int {
+	const max = 1000
+	composite := make([]bool, max)
+	primes := make([]int, 0, 168)
+	for i := 2; i < max; i++ {
+		if composite[i] {
+			continue
+		}
+		primes = append(primes, i)
+		for j := i * i; j < max; j += i {
+			composite[j] = true
+		}
+	}
+	return primes
+})
 
 func MarkEventProcessed[TX eventmodels.AbstractTX](ctx context.Context, tx TX, topic string, source string, id string, handlerName string) error {
 	result, err := tx.ExecContext(ctx, `
@@ -375,8 +644,11 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, backupTr
 	}
 	ids := eventdb.PreAllocateIDMap[eventmodels.BinaryEventID](events...)
 	ib := sq.Insert("eventsOutgoing").
-		Columns("id", "sequenceNumber", "topic", "ts", "`key`", "data", "headers").
+		Columns("id", "sequenceNumber", "topic", "ts", "`key`", "data", "headers", "sendAfter").
 		PlaceholderFormat(sq.Question)
+	// A producer will try to send the row itself, so catch-up waits out
+	// sendAfterGrace. With no producer, only catch-up can send it.
+	sendAfter := sendAfterExpr(optProducer != nil)
 
 	for i, event := range events {
 		topic := event.GetTopic()
@@ -391,7 +663,7 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, backupTr
 		if err != nil {
 			return nil, errors.Errorf("could not encode event headers to produce in topic (%s): %w", event.GetTopic(), err)
 		}
-		ib = ib.Values(id, i+1, event.GetTopic(), event.GetTimestamp().UTC().Format("2006-01-02 15:04:05.000000"), event.GetKey(), enc, headersEnc)
+		ib = ib.Values(id, i+1, event.GetTopic(), event.GetTimestamp().UTC().Format("2006-01-02 15:04:05.000000"), event.GetKey(), enc, headersEnc, sendAfter)
 	}
 	tracer := backupTracer
 	if optProducer != nil {

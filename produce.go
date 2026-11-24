@@ -255,6 +255,10 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventsByTo
 // for hours. That holds back restart_lsn on PostgreSQL replication slots and
 // retains WAL.
 //
+// Post-commit sends go through ProduceSpecificTxEvents. SingleStore bounds
+// each of those more tightly than this, so their locks are released before
+// catch-up is allowed to claim the same rows.
+//
 // When it expires the transaction rolls back, undoing the uncommitted deletes,
 // and the events are sent by a later pass. A canceled Kafka write may still
 // reach the broker, so this can duplicate an event but cannot lose one, which
@@ -263,6 +267,13 @@ func (lib *Library[ID, TX, DB]) ProduceFromTable(ctx context.Context, eventsByTo
 // Callers that produce by other routes supply their own context and are
 // responsible for their own deadlines.
 const catchUpTransactionTimeout = 5 * time.Minute
+
+// CatchUpProduceRunning reports whether CatchUpProduce has been started.
+// The flag stays set for the life of the process, matching the signal
+// ProduceFromTable uses to hand events to the background producer.
+func (lib *Library[ID, TX, DB]) CatchUpProduceRunning() bool {
+	return lib.producerRunning.Load() != 0
+}
 
 // CatchUpProduce starts a background thread that looks for events that were written to the
 // database during a transaction but were not sent to Kafka
