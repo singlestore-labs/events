@@ -2,38 +2,25 @@ package events2
 
 import (
 	"math/big"
-	"math/rand"
 
 	sq "github.com/Masterminds/squirrel"
 )
 
 const defaultCatchUpBuckets = 8
 
-// SetCatchUpBuckets sets how many id ranges the background catch-up splits
+// SetCatchUpBuckets sets how many id ranges a catch-up pass splits
 // eventsOutgoing into. Values below 1 are stored as 1, which turns bucketing
-// off and scans the whole id space in one pass. The default is 8.
+// off. The default is 8.
 //
-// The stride and starting bucket are chosen once here and kept until the next
-// call. Call this before catch-up starts. It is not goroutine-safe: catch-up
-// does not overlap its own passes, so the bucket fields are plain ints.
+// The stride and starting bucket are chosen in New and never change. The
+// stride is a prime of at least 100, so any count below that is visited
+// exactly once. Call this before catch-up starts. It is not goroutine-safe,
+// and there is no reason to change the count once catch-up is running.
 func (c *Connection[TX, DB]) SetCatchUpBuckets(n int) {
 	if n < 1 {
 		n = 1
 	}
-	stride := 1
-	offset := 0
-	if n > 1 {
-		stride = catchUpStride(n)
-		// math/rand's global generator is auto-seeded as of Go 1.20.
-		offset = rand.Intn(n)
-	}
-	c.catchUpStride = stride
-	c.catchUpOffset = offset
 	c.catchUpBuckets = n
-}
-
-func (c Connection[TX, DB]) catchUpPlan() (count, stride, offset int) {
-	return c.catchUpBuckets, c.catchUpStride, c.catchUpOffset
 }
 
 func applyBucketBounds(sb sq.SelectBuilder, bucket, count int) sq.SelectBuilder {
@@ -79,37 +66,20 @@ func bucketForStep(step, stride, offset, count int) int {
 	return int((int64(offset) + int64(step)*int64(stride)) % int64(count))
 }
 
-// catchUpStride picks a prime below 1000 that does not divide count. Stepping
-// by that prime visits every bucket once per pass, in an order that differs
-// per pod.
-func catchUpStride(count int) int {
-	if count <= 1 {
-		return 1
-	}
-	usable := make([]int, 0, len(primesBelow1000))
-	for _, prime := range primesBelow1000 {
-		if count%prime != 0 {
-			usable = append(usable, prime)
-		}
-	}
-	return usable[rand.Intn(len(usable))]
-}
-
-// primesBelow1000 is every prime below 1000. The list is fixed so catch-up
-// does not sieve on startup.
-var primesBelow1000 = []int{
-	2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37,
-	41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89,
-	97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151,
-	157, 163, 167, 173, 179, 181, 191, 193, 197, 199, 211, 223,
-	227, 229, 233, 239, 241, 251, 257, 263, 269, 271, 277, 281,
-	283, 293, 307, 311, 313, 317, 331, 337, 347, 349, 353, 359,
-	367, 373, 379, 383, 389, 397, 401, 409, 419, 421, 431, 433,
-	439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499, 503,
-	509, 521, 523, 541, 547, 557, 563, 569, 571, 577, 587, 593,
-	599, 601, 607, 613, 617, 619, 631, 641, 643, 647, 653, 659,
-	661, 673, 677, 683, 691, 701, 709, 719, 727, 733, 739, 743,
-	751, 757, 761, 769, 773, 787, 797, 809, 811, 821, 823, 827,
-	829, 839, 853, 857, 859, 863, 877, 881, 883, 887, 907, 911,
-	919, 929, 937, 941, 947, 953, 967, 971, 977, 983, 991, 997,
+// primesAtLeast100 is every prime from 100 up to 1000. A stride chosen from
+// this list stays coprime to any smaller bucket count, so it never has to
+// change.
+var primesAtLeast100 = []int{
+	101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157,
+	163, 167, 173, 179, 181, 191, 193, 197, 199, 211, 223, 227,
+	229, 233, 239, 241, 251, 257, 263, 269, 271, 277, 281, 283,
+	293, 307, 311, 313, 317, 331, 337, 347, 349, 353, 359, 367,
+	373, 379, 383, 389, 397, 401, 409, 419, 421, 431, 433, 439,
+	443, 449, 457, 461, 463, 467, 479, 487, 491, 499, 503, 509,
+	521, 523, 541, 547, 557, 563, 569, 571, 577, 587, 593, 599,
+	601, 607, 613, 617, 619, 631, 641, 643, 647, 653, 659, 661,
+	673, 677, 683, 691, 701, 709, 719, 727, 733, 739, 743, 751,
+	757, 761, 769, 773, 787, 797, 809, 811, 821, 823, 827, 829,
+	839, 853, 857, 859, 863, 877, 881, 883, 887, 907, 911, 919,
+	929, 937, 941, 947, 953, 967, 971, 977, 983, 991, 997,
 }

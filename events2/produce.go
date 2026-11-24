@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"sort"
 	"time"
@@ -28,14 +29,12 @@ const (
 	minimumLockAttemptTime = 100 * time.Millisecond // DB BEGIN + SELECT FOR UPDATE
 	foreverLockAttemptTime = time.Minute * 2
 
-	// sendAfterGrace is how long the post-commit send owns a row. Catch-up
-	// selects a row only after this has passed.
-	//
-	// fastPathSendTimeout bounds one post-commit attempt. The library can hold
-	// one batch behind an in-flight send, so a row's locks last at most two
-	// attempts. Two attempts fit inside sendAfterGrace.
-	sendAfterGrace      = 2 * time.Minute
-	fastPathSendTimeout = 30 * time.Second
+	// fastPathSendTimeout bounds one post-commit send. It matches the kafka
+	// writer's default write timeout. sendAfterGrace is the same length and is
+	// stamped at the end of the user transaction, so it covers that send and
+	// not the transaction that wrote the row.
+	fastPathSendTimeout = 10 * time.Second
+	sendAfterGrace      = fastPathSendTimeout
 )
 
 var debugging = os.Getenv("EVENTS_DEBUG_PRODUCE") == "true"
@@ -44,20 +43,25 @@ type Connection[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]] struct {
 	eventdb.BasicDB[TX]
 	lockPrefix string
 	producer   eventmodels.Producer[eventmodels.BinaryEventID, TX]
-	// catchUpBuckets, catchUpStride, and catchUpOffset are the catch-up walk.
-	// One catch-up loop runs at a time and these are not written during that
-	// loop, so they are not guarded. SetCatchUpBuckets is not goroutine-safe.
+	// catchUpBuckets is how many id ranges one catch-up pass walks.
+	// catchUpStride and catchUpOffset are chosen in New and then left alone.
+	// The count may be changed with SetCatchUpBuckets before catch-up starts.
+	// These are plain ints: nothing changes them once catch-up is running, and
+	// they are not goroutine-safe.
 	catchUpBuckets int
 	catchUpStride  int
 	catchUpOffset  int
 }
 
 func New[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]](db DB, lockPrefix string) *Connection[TX, DB] {
+	// math/rand's global generator is auto-seeded as of Go 1.20.
 	conn := &Connection[TX, DB]{
-		BasicDB:    db,
-		lockPrefix: lockPrefix,
+		BasicDB:        db,
+		lockPrefix:     lockPrefix,
+		catchUpBuckets: defaultCatchUpBuckets,
+		catchUpStride:  primesAtLeast100[rand.Intn(len(primesAtLeast100))],
+		catchUpOffset:  rand.Intn(defaultCatchUpBuckets),
 	}
-	conn.SetCatchUpBuckets(defaultCatchUpBuckets)
 	return conn
 }
 
@@ -231,9 +235,9 @@ func LockOrError[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](
 }
 
 func ProduceSpecificTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ctx context.Context, db DB, ids []eventmodels.BinaryEventID, producer eventmodels.Producer[eventmodels.BinaryEventID, TX]) (int, error) {
-	// One attempt. A batch can wait behind one in-flight send before this starts,
-	// so a row is locked for at most two of these, which stays inside
-	// sendAfterGrace. A shorter caller deadline still wins.
+	// One attempt, bounded by fastPathSendTimeout. sendAfterGrace is that same
+	// length and starts at the end of the user transaction. A shorter caller
+	// deadline still wins.
 	ctx, cancel := context.WithTimeout(ctx, fastPathSendTimeout)
 	defer cancel()
 	startTime := time.Now()
@@ -245,6 +249,9 @@ func ProduceSpecificTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransa
 	return count, err
 }
 
+// ProduceDroppedTxEvents drains one catch-up pass. It is not goroutine-safe.
+// The bucket count, stride, and offset are supplied by the caller and must not
+// change during the call, and only one pass may run at a time.
 func ProduceDroppedTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ctx context.Context, db DB, batchSize int, producer eventmodels.Producer[eventmodels.BinaryEventID, TX], bucketCount, stride, offset int) (int, error) {
 	if producer == nil {
 		return 0, errors.Errorf("attempt to produce dropped events with a connection not augmented with a producer")
@@ -487,9 +494,11 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, backupTr
 	ib := sq.Insert("eventsOutgoing").
 		Columns("id", "sequenceNumber", "topic", "ts", "`key`", "data", "headers", "sendAfter").
 		PlaceholderFormat(sq.Question)
-	// While catch-up is running, the post-commit send owns the row for
-	// sendAfterGrace. Otherwise catch-up may take it immediately.
-	sendAfter := sendAfterExpr(optProducer != nil && optProducer.CatchUpProduceRunning())
+	// Insert with sendAfter = NOW(6). When catch-up is running, the last
+	// statement of this call stamps NOW(6) plus the grace. Transact makes
+	// this call after the user's function returns, immediately before commit,
+	// so the grace does not include the user transaction.
+	catchUpRunning := optProducer != nil && optProducer.CatchUpProduceRunning()
 
 	for i, event := range events {
 		topic := event.GetTopic()
@@ -504,7 +513,7 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, backupTr
 		if err != nil {
 			return nil, errors.Errorf("could not encode event headers to produce in topic (%s): %w", event.GetTopic(), err)
 		}
-		ib = ib.Values(id, i+1, event.GetTopic(), event.GetTimestamp().UTC().Format("2006-01-02 15:04:05.000000"), event.GetKey(), enc, headersEnc, sendAfter)
+		ib = ib.Values(id, i+1, event.GetTopic(), event.GetTimestamp().UTC().Format("2006-01-02 15:04:05.000000"), event.GetKey(), enc, headersEnc, sq.Expr("NOW(6)"))
 	}
 	tracer := backupTracer
 	if optProducer != nil {
@@ -520,5 +529,30 @@ func SaveEventsInsideTx[TX eventmodels.AbstractTX](ctx context.Context, backupTr
 		tracer("[SaveEventsInsideTx] could not insert event: %s: %s", sql, err)
 		return nil, errors.WithStack(err)
 	}
+	if catchUpRunning {
+		if err := stampSendAfter(ctx, tx, ids); err != nil {
+			return nil, err
+		}
+	}
 	return ids, nil
+}
+
+func stampSendAfter[TX eventmodels.AbstractTX](ctx context.Context, tx TX, ids map[string][]eventmodels.BinaryEventID) error {
+	flat := make([]eventmodels.BinaryEventID, 0)
+	for _, topicIDs := range ids {
+		flat = append(flat, topicIDs...)
+	}
+	q, args, err := sq.Update("eventsOutgoing").
+		Set("sendAfter", sendAfterExpr(true)).
+		Where(sq.Eq{"id": flat}).
+		PlaceholderFormat(sq.Question).
+		ToSql()
+	if err != nil {
+		return errors.Errorf("cannot build sendAfter update: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, q, args...)
+	if err != nil {
+		return errors.Errorf("cannot stamp sendAfter: %w", err)
+	}
+	return nil
 }
