@@ -50,75 +50,44 @@ type Connection[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]] struct {
 	lockPrefix     string
 	producer       eventmodels.Producer[eventmodels.BinaryEventID, TX]
 	catchUpBuckets *atomic.Int32
-	catchUpStride  *catchUpStrideCache
-}
-
-// catchUpStrideCache keeps one prime stride per bucket count. A pod walks
-// buckets in the same order until the count changes, so pods with different
-// strides cross instead of marching together.
-type catchUpStrideCache struct {
-	mu     sync.Mutex
-	count  int
-	stride int
-}
-
-func (c *catchUpStrideCache) strideFor(count int) int {
-	if count <= 1 {
-		return 1
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.count != count || c.stride == 0 {
-		c.count = count
-		c.stride = catchUpStride(count)
-	}
-	return c.stride
+	catchUpStride  *atomic.Int32
+	catchUpOffset  *atomic.Int32
 }
 
 func New[TX eventdb.BasicTX, DB eventdb.BasicDB[TX]](db DB, lockPrefix string) *Connection[TX, DB] {
-	buckets := &atomic.Int32{}
-	buckets.Store(defaultCatchUpBuckets)
-	return &Connection[TX, DB]{
+	conn := &Connection[TX, DB]{
 		BasicDB:        db,
 		lockPrefix:     lockPrefix,
-		catchUpBuckets: buckets,
-		catchUpStride:  &catchUpStrideCache{},
+		catchUpBuckets: &atomic.Int32{},
+		catchUpStride:  &atomic.Int32{},
+		catchUpOffset:  &atomic.Int32{},
 	}
+	conn.SetCatchUpBuckets(defaultCatchUpBuckets)
+	return conn
 }
 
 // SetCatchUpBuckets sets how many id ranges the background catch-up splits
-// eventsOutgoing into. The minimum is 1, which turns bucketing off and scans
-// the whole id space in one pass. The default is 8. A change takes effect on
-// the next catch-up pass.
+// eventsOutgoing into. Values below 1 are stored as 1, which turns bucketing
+// off and scans the whole id space in one pass. The default is 8. The stride
+// and starting bucket are chosen here and kept until the next call, so a pod
+// walks the same order on each pass. A change takes effect on the next pass.
 func (c *Connection[TX, DB]) SetCatchUpBuckets(n int) {
-	if c == nil || c.catchUpBuckets == nil {
-		panic("events2: SetCatchUpBuckets on uninitialized connection")
-	}
 	if n < 1 {
-		panic("events2: catch-up bucket count must be at least 1")
+		n = 1
 	}
+	stride := 1
+	offset := 0
+	if n > 1 {
+		stride = catchUpStride(n)
+		offset = rand.Intn(n)
+	}
+	c.catchUpStride.Store(int32(stride))
+	c.catchUpOffset.Store(int32(offset))
 	c.catchUpBuckets.Store(int32(n))
 }
 
-func (c Connection[TX, DB]) catchUpBucketCount() int {
-	if c.catchUpBuckets == nil {
-		return defaultCatchUpBuckets
-	}
-	n := int(c.catchUpBuckets.Load())
-	if n < 1 {
-		return 1
-	}
-	return n
-}
-
-func (c Connection[TX, DB]) catchUpStrideFor(count int) int {
-	if count <= 1 {
-		return 1
-	}
-	if c.catchUpStride == nil {
-		return catchUpStride(count)
-	}
-	return c.catchUpStride.strideFor(count)
+func (c Connection[TX, DB]) catchUpPlan() (count, stride, offset int) {
+	return int(c.catchUpBuckets.Load()), int(c.catchUpStride.Load()), int(c.catchUpOffset.Load())
 }
 
 func Migrations(database *libschema.Database, singlestore *lssinglestore.SingleStore) {
@@ -309,16 +278,13 @@ func ProduceDroppedTxEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransac
 	if producer == nil {
 		return 0, errors.Errorf("attempt to produce dropped events with a connection not augmented with a producer")
 	}
-	if batchSize < 1 {
-		return 0, errors.Errorf("catch-up batch size must be at least 1")
-	}
-	bucketCount, stride := catchUpPlanFor(db)
+	bucketCount, stride, offset := catchUpPlanFor(db)
 	var totalCount int
 	for step := 0; step < bucketCount; step++ {
 		if ctx.Err() != nil {
 			return totalCount, nil
 		}
-		bucket := bucketForStep(step, stride, bucketCount)
+		bucket := bucketForStep(step, stride, offset, bucketCount)
 		for {
 			ids, err := selectCatchUpIDs(ctx, db, batchSize, bucket, bucketCount)
 			if err != nil {
@@ -554,27 +520,23 @@ func idBound(i *big.Int) []byte {
 	return out
 }
 
-func bucketForStep(step, stride, count int) int {
+func bucketForStep(step, stride, offset, count int) int {
 	if count <= 1 {
 		return 0
 	}
-	return int((int64(step) * int64(stride)) % int64(count))
+	return int((int64(offset) + int64(step)*int64(stride)) % int64(count))
 }
 
 type catchUpPlanner interface {
-	catchUpBucketCount() int
-	catchUpStrideFor(int) int
+	catchUpPlan() (count, stride, offset int)
 }
 
-func catchUpPlanFor(db any) (count, stride int) {
+func catchUpPlanFor(db any) (count, stride, offset int) {
 	if plan, ok := db.(catchUpPlanner); ok {
-		count = plan.catchUpBucketCount()
-		if count < 1 {
-			count = 1
-		}
-		return count, plan.catchUpStrideFor(count)
+		return plan.catchUpPlan()
 	}
-	return defaultCatchUpBuckets, catchUpStride(defaultCatchUpBuckets)
+	count = defaultCatchUpBuckets
+	return count, catchUpStride(count), rand.Intn(count)
 }
 
 // catchUpStride picks a prime below 1000 that does not divide count. Stepping

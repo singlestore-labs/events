@@ -13,16 +13,26 @@ import (
 
 func TestSetCatchUpBuckets(t *testing.T) {
 	conn := New[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB](eventdb.ExampleBasicDB{}, "prefix")
-	assert.Equal(t, defaultCatchUpBuckets, conn.catchUpBucketCount())
+	count, stride, offset := catchUpPlanFor(conn)
+	assert.Equal(t, defaultCatchUpBuckets, count)
+	assert.NotZero(t, count%stride)
+	assert.GreaterOrEqual(t, offset, 0)
+	assert.Less(t, offset, count)
 
-	conn.SetCatchUpBuckets(1)
-	count, stride := catchUpPlanFor(conn)
+	conn.SetCatchUpBuckets(0)
+	count, stride, offset = catchUpPlanFor(conn)
 	assert.Equal(t, 1, count)
 	assert.Equal(t, 1, stride)
+	assert.Equal(t, 0, offset)
 
 	conn.SetCatchUpBuckets(8)
-	assert.Equal(t, 8, conn.catchUpBucketCount())
-	assert.Panics(t, func() { conn.SetCatchUpBuckets(0) })
+	count, stride, offset = conn.catchUpPlan()
+	again, againStride, againOffset := conn.catchUpPlan()
+	assert.Equal(t, 8, count)
+	assert.Equal(t, count, again)
+	assert.Equal(t, stride, againStride)
+	assert.Equal(t, offset, againOffset)
+	assert.NotZero(t, count%stride)
 }
 
 func TestBucketBoundsTileTheIDSpace(t *testing.T) {
@@ -82,34 +92,32 @@ func TestCatchUpStrideVisitsEveryBucket(t *testing.T) {
 			if count > 1 && count%stride == 0 {
 				t.Fatalf("count %d stride %d divides the count", count, stride)
 			}
+			offset := 0
+			if count > 1 {
+				offset = count / 2
+			}
 			seen := make(map[int]struct{}, count)
 			for step := 0; step < count; step++ {
-				seen[bucketForStep(step, stride, count)] = struct{}{}
+				seen[bucketForStep(step, stride, offset, count)] = struct{}{}
 			}
 			assert.Len(t, seen, count, "count %d stride %d trial %d", count, stride, trial)
+			if count > 1 {
+				assert.Equal(t, offset, bucketForStep(0, stride, offset, count))
+			}
 		}
 	}
 }
 
-func TestCatchUpStrideStaysPutUntilTheCountChanges(t *testing.T) {
-	cache := &catchUpStrideCache{}
-	first := cache.strideFor(8)
-	assert.Equal(t, first, cache.strideFor(8))
-	assert.NotZero(t, 8%first)
-
+func TestCatchUpWalkCoversEveryBucket(t *testing.T) {
+	conn := New[*eventdb.ExampleBasicTX, eventdb.ExampleBasicDB](eventdb.ExampleBasicDB{}, "prefix")
+	conn.SetCatchUpBuckets(8)
+	count, stride, offset := conn.catchUpPlan()
 	seen := map[int]struct{}{}
-	for step := 0; step < 8; step++ {
-		seen[bucketForStep(step, first, 8)] = struct{}{}
+	for step := 0; step < count; step++ {
+		seen[bucketForStep(step, stride, offset, count)] = struct{}{}
 	}
-	assert.Len(t, seen, 8)
-
-	other := cache.strideFor(9)
-	assert.Equal(t, other, cache.strideFor(9))
-	assert.NotZero(t, 9%other)
-
-	restored := cache.strideFor(8)
-	assert.Equal(t, restored, cache.strideFor(8))
-	assert.NotZero(t, 8%restored)
+	assert.Len(t, seen, count)
+	assert.Equal(t, offset, bucketForStep(0, stride, offset, count))
 }
 
 func TestSendAfterExpr(t *testing.T) {
