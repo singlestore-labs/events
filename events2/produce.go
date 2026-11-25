@@ -315,20 +315,28 @@ func produceEvents[TX eventmodels.AbstractTX, DB eventmodels.CanTransact[TX]](ct
 			return sql.ErrNoRows
 		}
 
-		for _, event := range toProduce {
-			results, err := tx.ExecContext(ctx, `
-				DELETE FROM eventsOutgoing
-				WHERE	id = ?`, event.ID)
-			if err != nil {
-				return errors.WithStack(err)
-			}
-			rowCount, err := results.RowsAffected()
-			if err != nil {
-				return errors.WithStack(err)
-			}
-			if rowCount != 1 {
-				return errors.Errorf("attempt to delete event (%s) from outgoing table didn't work (%d)", event.ID, rowCount)
-			}
+		deleteIDs := generic.TransformSlice(toProduce,
+			func(blob *eventdb.ProducingEventBlob[eventmodels.BinaryEventID]) eventmodels.BinaryEventID {
+				return blob.ID
+			})
+		deleteQuery, deleteArgs, err := sq.
+			Delete("eventsOutgoing").
+			Where(sq.Eq{"id": deleteIDs}).
+			PlaceholderFormat(sq.Question).
+			ToSql()
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		results, err := tx.ExecContext(ctx, deleteQuery, deleteArgs...)
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		rowCount, err := results.RowsAffected()
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		if rowCount != int64(len(toProduce)) {
+			return errors.Errorf("attempt to delete events (%d) from outgoing table didn't work (%d)", len(toProduce), rowCount)
 		}
 
 		count += len(toProduce)
